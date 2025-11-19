@@ -123,6 +123,11 @@ class GridPCGEnv(gym.Env):
         self.max_steps = int(max_steps)
         self.use_curriculum = bool(use_curriculum)
         self.wall_target = float(wall_target)
+        
+        # Curriculum state
+        self.progress = 0.0 # 0.0 to 1.0
+        self._cur_wall_target = 0.05
+        self._cur_movable_target = 0.0
 
         self.steps = 0
         self.rng = np.random.RandomState(seed if seed is not None else 42)
@@ -168,6 +173,37 @@ class GridPCGEnv(gym.Env):
         self.step_cost = 0.0002
         self.first_valid_bonus = 0.15
         self._was_valid = False
+
+    def set_progress(self, p: float):
+        """
+        Update curriculum progress (0.0 -> 1.0).
+        Schedule:
+          0.0 - 0.2: Basics (Walls 0.05, Movables 0)
+          0.2 - 0.5: Walls Ramp (0.05 -> 0.25)
+          0.5 - 0.8: Movables Ramp (0 -> 7)
+          0.8 - 1.0: Polish (Full constraints)
+        """
+        self.progress = np.clip(p, 0.0, 1.0)
+        
+        # Wall Target Schedule
+        if self.progress < 0.2:
+            self._cur_wall_target = 0.05
+        elif self.progress < 0.5:
+            # Linear ramp 0.05 -> 0.25
+            ratio = (self.progress - 0.2) / 0.3
+            self._cur_wall_target = 0.05 + ratio * (0.25 - 0.05)
+        else:
+            self._cur_wall_target = 0.25
+            
+        # Movable Target Schedule
+        if self.progress < 0.5:
+            self._cur_movable_target = 0.0
+        elif self.progress < 0.8:
+            # Linear ramp 0 -> 7
+            ratio = (self.progress - 0.5) / 0.3
+            self._cur_movable_target = 0.0 + ratio * 7.0
+        else:
+            self._cur_movable_target = 7.0
 
     # ---------- helpers ----------
     def _obs(self) -> np.ndarray:
@@ -353,11 +389,13 @@ class GridPCGEnv(gym.Env):
         wr = ws["ratio"]
         
         # STRICTLY target wall ratio (walls only) to force structure
-        # Previous logic used solid_ratio which allowed movables to substitute for walls.
-        wall_dev = abs(wr - self.wall_target)
+        # Use DYNAMIC curriculum target
+        wall_dev = abs(wr - self._cur_wall_target)
 
-        # small bonus if we land inside the [0.18, 0.32] band (using WALL ratio)
-        band_bonus = 0.5 if (self._wall_band_lo <= wr <= self._wall_band_hi) else -0.5
+        # small bonus if we land inside the [target-0.05, target+0.05] band
+        band_lo = max(0.0, self._cur_wall_target - 0.05)
+        band_hi = min(1.0, self._cur_wall_target + 0.05)
+        band_bonus = 0.5 if (band_lo <= wr <= band_hi) else -0.5
 
         # LINEAR penalty away from target (V4: EXTREME wall enforcement)
         # If wall_ratio is 0.05 (dev 0.2), penalty is -1.0.
@@ -379,14 +417,23 @@ class GridPCGEnv(gym.Env):
         # --- Movable Logic ---
         
         # A. Quantity Reward (Bell curve around target)
-        # Target 7, sigma 2.5 gives good rewards for 4-10 range.
+        # Use DYNAMIC curriculum target
         movable_count_term = 0.0
-        if n_movable > 0:
-            if 4 <= n_movable <= 10:
+        
+        # If target is 0 (early phase), penalize ANY movables
+        if self._cur_movable_target < 0.1:
+            if n_movable > 0:
+                movable_count_term = -0.1 * n_movable
+        elif n_movable > 0:
+            # Target range: target +/- 3
+            t_min = max(1, self._cur_movable_target - 3)
+            t_max = self._cur_movable_target + 3
+            
+            if t_min <= n_movable <= t_max:
                 movable_count_term = self.lambda_movable # Max bonus in range
             else:
                 # Linear penalty outside range
-                diff = min(abs(n_movable - 4), abs(n_movable - 10))
+                diff = min(abs(n_movable - t_min), abs(n_movable - t_max))
                 movable_count_term = -0.1 * diff
         
         # B. On-Path Reward
@@ -690,9 +737,12 @@ class GridPCGEnv(gym.Env):
         # coax toward some walls/obstacles once valid (using solid ratio)
         now_valid = self._valid_final()
         if now_valid:
-            # Use combined solid ratio (walls + movables) for coaxing
-            solid_r = float(np.mean((self.grid == WALL) | (self.grid == MOVABLE)))
-            reward += self.wall_step_coax * min(solid_r / self.wall_target, 1.0)
+            # Use dynamic wall target for coaxing
+            # Only coax if we are below the current target
+            wr = float(np.mean(self.grid == WALL))
+            if wr < self._cur_wall_target:
+                reward += self.wall_step_coax
+            
             if t in (ROBOT, GOAL, OBJECT):
                 reward -= 0.02
 

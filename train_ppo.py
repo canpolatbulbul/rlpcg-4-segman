@@ -40,6 +40,24 @@ class StopAfterSteps(BaseCallback):
         return self.model.num_timesteps < self.max_env_steps
 
 
+class CurriculumCallback(BaseCallback):
+    """
+    Updates the environment's progress (0.0 -> 1.0) based on training steps.
+    """
+    def __init__(self, total_timesteps: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+
+    def _on_step(self) -> bool:
+        # Calculate progress
+        progress = self.num_timesteps / self.total_timesteps
+        
+        # Update all envs
+        # We use env_method to call set_progress on the underlying GridPCGEnv
+        self.training_env.env_method("set_progress", progress)
+        return True
+
+
 def main():
     p = argparse.ArgumentParser()
     # env
@@ -135,7 +153,11 @@ def main():
         deterministic=False,
     )
 
-    callbacks = [eval_cb]
+    
+    # Curriculum Callback
+    curr_cb = CurriculumCallback(total_timesteps=args.total_timesteps)
+    
+    callbacks = [eval_cb, curr_cb]
     if args.pause_after > 0:
         callbacks.append(StopAfterSteps(args.pause_after))
 
