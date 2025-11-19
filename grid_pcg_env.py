@@ -520,9 +520,19 @@ class GridPCGEnv(gym.Env):
         if seed is not None:
             self.rng.seed(seed)
         self.steps = 0
+        # 1. Fill with EMPTY
         self.grid.fill(EMPTY)
+        
+        # 2. Subtractive Curriculum: Seed with walls if target is high
+        if self._cur_wall_target > 0.10:
+            seed_density = self._cur_wall_target + 0.10
+            mask = self.rng.rand(self.h, self.w) < seed_density
+            self.grid[mask] = WALL
+        else:
+            # Low target: use old bootstrap (random segments)
+            self._seed_walls_bootstrap()
 
-        # tiny curriculum: start with 0–2 entities already placed
+        # 3. Place unique entities (curriculum)
         if self.use_curriculum:
             k = int(self.rng.randint(0, 3))  # 0, 1, or 2
             pool = [ROBOT, OBJECT, GOAL]
@@ -536,7 +546,7 @@ class GridPCGEnv(gym.Env):
                         used.add((y, x))
                         break
                 self._place_unique(t, y, x)
-        self._seed_walls_bootstrap()
+        
         self._was_valid = self._valid_final()
         return self._obs(), {}
 
