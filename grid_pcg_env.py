@@ -13,7 +13,8 @@ TILES = (EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE)
 N_TILES = len(TILES)
 
 # ---- BFS on 4-connected grid, walls and movable obstacles are blocked ----
-def shortest_path_len(grid: np.ndarray, start, goal) -> int | None:
+# ---- BFS on 4-connected grid ----
+def shortest_path_len(grid: np.ndarray, start, goal, treat_movable_as_empty=False) -> int | None:
     H, W = grid.shape
     (sy, sx), (gy, gx) = start, goal
     if (sy, sx) == (gy, gx):
@@ -30,14 +31,66 @@ def shortest_path_len(grid: np.ndarray, start, goal) -> int | None:
                 continue
             if seen[ny, nx]:
                 continue
-            # Both WALL and MOVABLE block pathfinding
-            if grid[ny, nx] == WALL or grid[ny, nx] == MOVABLE:
+            
+            cell = grid[ny, nx]
+            # WALL always blocks. MOVABLE blocks unless treated as empty.
+            if cell == WALL:
                 continue
+            if cell == MOVABLE and not treat_movable_as_empty:
+                continue
+                
             if (ny, nx) == (gy, gx):
                 return d + 1
             seen[ny, nx] = True
             q.append((ny, nx, d+1))
     return None
+
+def get_shortest_path_cells(grid: np.ndarray, start, goal, treat_movable_as_empty=False) -> set:
+    """
+    Returns a set of (y, x) coordinates on the shortest path.
+    If multiple shortest paths exist, this returns one of them (arbitrary).
+    Returns empty set if no path.
+    """
+    H, W = grid.shape
+    (sy, sx), (gy, gx) = start, goal
+    if (sy, sx) == (gy, gx):
+        return {(sy, sx)}
+        
+    # BFS to find distance to start from all reachable cells
+    # We'll search backwards from start to fill a dist map, then trace back from goal?
+    # Actually, standard BFS from start recording parents is easier for reconstruction.
+    
+    parent = {}
+    q = deque()
+    q.append((sy, sx))
+    parent[(sy, sx)] = None
+    visited = np.zeros_like(grid, dtype=bool)
+    visited[sy, sx] = True
+    
+    found = False
+    while q:
+        y, x = q.popleft()
+        if (y, x) == (gy, gx):
+            found = True
+            break
+        
+        for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+            ny, nx = y+dy, x+dx
+            if 0 <= ny < H and 0 <= nx < W and not visited[ny, nx]:
+                cell = grid[ny, nx]
+                is_blocked = (cell == WALL) or (cell == MOVABLE and not treat_movable_as_empty)
+                if not is_blocked:
+                    visited[ny, nx] = True
+                    parent[(ny, nx)] = (y, x)
+                    q.append((ny, nx))
+    
+    path_cells = set()
+    if found:
+        curr = (gy, gx)
+        while curr is not None:
+            path_cells.add(curr)
+            curr = parent[curr]
+    return path_cells
 
 
 class GridPCGEnv(gym.Env):
@@ -87,8 +140,14 @@ class GridPCGEnv(gym.Env):
         self.lambda_block_term = 0.3    # terminal penalty for 2x2 wall blocks
         
         # movable obstacle reward shaping
+        # movable obstacle reward shaping
         self.lambda_movable = 0.4  # bonus for having movable obstacles (terminal)
-        self.movable_desired_count = 2.5  # target number of movables for bonus scaling
+        self.movable_desired_count = 4.5  # target ~4-5 movables
+        
+        # New movable-specific weights
+        self.lambda_movable_on_path = 0.6  # Bonus for movable being on the static path
+        self.lambda_boxed = 0.15           # Penalty for boxed-in movables
+        self.lambda_path_obstruction = 0.3 # Bonus if blocked path > static path (it's doing work)
 
         # per-step coax toward "some walls" after all 3 entities exist
         self.wall_step_coax = 0.06
@@ -250,7 +309,9 @@ class GridPCGEnv(gym.Env):
             "iso_frac": 0.0,
             "n_movable": 0,
             "movable_ratio": 0.0,
-            "solid_ratio": 0.0
+            "solid_ratio": 0.0,
+            "n_movable_on_path": 0,
+            "n_boxed": 0
         }
 
         if not self._valid_final():
@@ -260,13 +321,23 @@ class GridPCGEnv(gym.Env):
         oy, ox = self._pos(OBJECT)
         gy, gx = self._pos(GOAL)
 
-        L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox))
-        if L1 is None:
-            return -0.5, metrics
-        L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx))
-        if L2 is None:
-            return -0.5, metrics
+        # 1. Check STATIC solvability (ignoring movables)
+        # This ensures no WALLS block the path.
+        L1_static = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+        L2_static = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        
+        if L1_static is None or L2_static is None:
+            # Unsolvable due to walls -> heavy penalty
+            return -1.0, metrics
 
+        # 2. Check BLOCKED solvability (respecting movables)
+        # This tells us if movables are currently blocking the path (which is okay/good if pushable)
+        L1_blocked = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+        L2_blocked = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+        
+        # Note: L1_blocked might be None if movables block the path. That's allowed!
+        # But we use L_static for the base path reward to encourage short *potential* paths.
+        
         # trivial adjacency (touching)
         adj_trivial = 0.0
         if max(abs(ry - oy), abs(rx - ox)) <= 1:
@@ -278,7 +349,7 @@ class GridPCGEnv(gym.Env):
         ws = self._wall_stats()
         n_movable = ws["n_movable"]
         solid_ratio = ws["solid_ratio"]
-        wr = ws["ratio"]  # wall ratio (for backward compat)
+        wr = ws["ratio"]
         
         # Use solid_ratio for target penalty (walls + movables combined)
         wall_dev = abs(solid_ratio - self.wall_target)
@@ -286,10 +357,10 @@ class GridPCGEnv(gym.Env):
         # small bonus if we land inside the [0.18, 0.32] band (using solid ratio)
         band_bonus = 0.5 if (self._wall_band_lo <= solid_ratio <= self._wall_band_hi) else -0.5
 
-        # curved penalty away from target (keeps learning pressure outside band)
+        # curved penalty away from target
         wall_term = band_bonus - self.beta * (wall_dev ** 1.5) * 2.0
 
-        # corridor quality (using combined solid mask)
+        # corridor quality
         if ws["n_solid"] > 0:
             adj_per_wall = ws["n_adj_pairs"] / float(ws["n_solid"])
             iso_frac = ws["n_isolated"] / float(ws["n_solid"])
@@ -302,34 +373,90 @@ class GridPCGEnv(gym.Env):
                 - self.lambda_block_term * (ws["n_2x2"] / max(1, ws["n_solid"]))
         )
 
-        # Movable obstacle bonus (encourage having some movables)
-        movable_bonus = 0.0
+        # --- Movable Logic ---
+        
+        # A. Quantity Reward (Bell curve around target)
+        # Using a Gaussian-like shape: exp(-0.5 * ((x - target) / sigma)^2)
+        # sigma=1.5 means 3-6 is the "good" range.
+        movable_count_term = 0.0
         if n_movable > 0:
-            # Scale bonus based on how close we are to desired count
-            movable_bonus = self.lambda_movable * min(n_movable / self.movable_desired_count, 1.0)
+            sigma = 1.5
+            diff = n_movable - self.movable_desired_count
+            movable_count_term = self.lambda_movable * np.exp(-0.5 * (diff / sigma)**2)
+        
+        # B. On-Path Reward
+        # Identify cells on the STATIC shortest path
+        path_cells = get_shortest_path_cells(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+        path_cells |= get_shortest_path_cells(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        
+        n_on_path = 0
+        n_boxed = 0
+        
+        # Iterate movables to check path intersection and boxed status
+        ys, xs = np.where(self.grid == MOVABLE)
+        for my, mx in zip(ys, xs):
+            if (my, mx) in path_cells:
+                n_on_path += 1
+            
+            # Check if boxed (3+ neighbors are solid)
+            # Note: self is solid (MOVABLE), so we check neighbors
+            deg = 0
+            for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                ny, nx = my+dy, mx+dx
+                if 0 <= ny < self.h and 0 <= nx < self.w:
+                    if self.grid[ny, nx] == WALL or self.grid[ny, nx] == MOVABLE:
+                        deg += 1
+                else:
+                    deg += 1 # border is solid
+            if deg >= 3:
+                n_boxed += 1
+
+        movable_quality_term = (
+            + self.lambda_movable_on_path * n_on_path
+            - self.lambda_boxed * n_boxed
+        )
+        
+        # C. Obstruction Bonus
+        # If L_blocked > L_static (or None), it means movables are effectively increasing the path length
+        # which implies they are "in the way" (good for a puzzle).
+        obstruction_bonus = 0.0
+        path_len_static = L1_static + L2_static
+        path_len_blocked = (L1_blocked + L2_blocked) if (L1_blocked is not None and L2_blocked is not None) else float('inf')
+        
+        if path_len_blocked > path_len_static:
+            obstruction_bonus = self.lambda_path_obstruction
 
         border_pen = self._border_penalty(margin=1)
         free_comps = self._free_space_components()
         free_space_pen = 0.15 * max(0, free_comps - 1)
 
+        # Base reward uses STATIC path length (so we don't penalize the agent for blocking the path with movables)
         R = (0.5
-             + self.alpha * (L1 + L2)
+             + self.alpha * path_len_static
              + wall_term
              + corridor_term
-             + movable_bonus
+             + movable_count_term
+             + movable_quality_term
+             + obstruction_bonus
              - self.gamma * adj_trivial
              - self.delta * border_pen
              - free_space_pen)
+             
         if ws["n_solid"] == 0:
-            R -= 0.5  # endings with zero solid obstacles should be clearly worse
+            R -= 0.5
+
         metrics.update({
-            "valid": 1, "L1": int(L1), "L2": int(L2),
+            "valid": 1, 
+            "L1": int(L1_static), 
+            "L2": int(L2_static),
             "wall_ratio": wr,
             "adj_per_wall": adj_per_wall,
             "iso_frac": iso_frac,
             "n_movable": n_movable,
             "movable_ratio": ws["movable_ratio"],
-            "solid_ratio": solid_ratio
+            "solid_ratio": solid_ratio,
+            "n_movable_on_path": n_on_path,
+            "n_boxed": n_boxed
         })
         return float(R), metrics
 
@@ -399,6 +526,15 @@ class GridPCGEnv(gym.Env):
         prev_iso_frac = (prev_stats["n_isolated"] / float(prev_stats["n_solid"])
                          if prev_stats["n_solid"] > 0 else 0.0)
 
+        # Pre-calculate static path cells for shaping
+        path_cells_static = set()
+        if prev_valid:
+            ry, rx = self._pos(ROBOT)
+            oy, ox = self._pos(OBJECT)
+            gy, gx = self._pos(GOAL)
+            path_cells_static = get_shortest_path_cells(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            path_cells_static |= get_shortest_path_cells(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+
         # apply edit
         if t in (ROBOT, OBJECT, GOAL):
             cur = self._pos(t)
@@ -416,24 +552,34 @@ class GridPCGEnv(gym.Env):
         elif t == MOVABLE:
             # Movable obstacles: cannot overwrite entities, can replace walls or empty cells
             if self.grid[y, x] in (ROBOT, OBJECT, GOAL):
-                reward -= 0.03  # slightly stronger penalty than wall (movables are more "interesting")
+                reward -= 0.03
             elif self.grid[y, x] == MOVABLE:
-                reward -= 0.01  # redundant placement
+                reward -= 0.01  # redundant
             elif self.grid[y, x] == WALL:
-                # Allow converting wall to movable (neutral or small positive)
+                # Converting wall to movable
                 self.grid[y, x] = MOVABLE
                 reward += 0.01
+                # Bonus if this new movable is on the static path
+                if (y, x) in path_cells_static:
+                    reward += 0.05
             else:  # EMPTY
                 # Place movable on empty cell
                 self.grid[y, x] = MOVABLE
-                reward += 0.04  # slightly higher than wall placement since movables are more interesting
+                reward += 0.02
+                # Strong bonus if placed on the static path
+                if (y, x) in path_cells_static:
+                    reward += 0.08
+                
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
                 reward -= 0.01
             elif self.grid[y, x] == MOVABLE:
-                # Removing a movable (placing EMPTY on MOVABLE)
+                # Removing a movable
                 self.grid[y, x] = EMPTY
-                reward -= 0.02  # mild penalty for removing movables
+                reward -= 0.02
+                # Penalty if removing from path (we want them there!)
+                if (y, x) in path_cells_static:
+                    reward -= 0.05
             else:
                 self.grid[y, x] = EMPTY
 
@@ -504,6 +650,17 @@ class GridPCGEnv(gym.Env):
                 )
                 if makes_2x2:
                     reward -= 0.03
+                
+                # Check if boxed (3+ neighbors solid)
+                deg_solid = 0
+                for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                    ny, nx = y+dy, x+dx
+                    if 0 <= ny < H and 0 <= nx < W:
+                        if g_solid[ny, nx]: deg_solid += 1
+                    else:
+                        deg_solid += 1
+                if deg_solid >= 3:
+                    reward -= 0.05 # Penalty for placing a boxed movable
             
             # discourage deleting walls without reason (WALL -> EMPTY)
             if t == EMPTY and prev_grid[y, x] == WALL and self.grid[y, x] == EMPTY:
