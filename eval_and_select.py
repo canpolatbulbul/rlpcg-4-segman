@@ -16,7 +16,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
 
-from grid_pcg_env import GridPCGEnv, EMPTY, WALL, ROBOT, OBJECT, GOAL
+from grid_pcg_env import GridPCGEnv, EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE
 
 # ---------- plotting ----------
 
@@ -26,6 +26,7 @@ COLORS = {
     ROBOT: (0.22, 0.49, 0.99),   # blue
     OBJECT:(0.98, 0.36, 0.85),   # magenta/pink
     GOAL:  (0.98, 0.70, 0.19),   # gold
+    MOVABLE: (0.40, 0.70, 0.40),  # green (movable obstacles)
 }
 
 def save_grid_png(grid: np.ndarray, out_path: Path, title: str = ""):

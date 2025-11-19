@@ -27,7 +27,7 @@ def main():
     env = GridPCGEnv(size=args.size, max_steps=args.max_steps)
     model = PPO.load(args.model, env=env, device="auto")
 
-    keys = ["wall_ratio","adj_per_wall","iso_frac","L1","L2","valid"]
+    keys = ["wall_ratio","adj_per_wall","iso_frac","L1","L2","valid","n_movable","movable_ratio","solid_ratio"]
     acc = {k: [] for k in ["reward"]+keys}
 
     for _ in range(args.episodes):

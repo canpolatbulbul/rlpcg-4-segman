@@ -24,7 +24,7 @@ from stable_baselines3 import PPO
 from grid_pcg_env import GridPCGEnv
 
 # ---- Tile IDs (must match env) ----
-EMPTY, WALL, ROBOT, OBJECT, GOAL = 0, 1, 2, 3, 4
+EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE = 0, 1, 2, 3, 4, 5
 
 
 # ---------- helpers ----------
@@ -61,6 +61,7 @@ def grid_to_rgb(grid: np.ndarray) -> np.ndarray:
         ROBOT:  (0.20, 0.45, 0.95),  # blue
         OBJECT: (0.97, 0.75, 0.25),  # orange/yellow
         GOAL:   (0.95, 0.35, 0.75),  # magenta
+        MOVABLE: (0.40, 0.70, 0.40),  # green (movable obstacles)
     }
     for tid, col in colors.items():
         img[grid == tid] = col

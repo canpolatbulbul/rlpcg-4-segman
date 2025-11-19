@@ -8,11 +8,11 @@ from gymnasium import spaces
 from collections import deque
 
 # ---- Tile IDs ----
-EMPTY, WALL, ROBOT, OBJECT, GOAL = 0, 1, 2, 3, 4
-TILES = (EMPTY, WALL, ROBOT, OBJECT, GOAL)
+EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE = 0, 1, 2, 3, 4, 5
+TILES = (EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE)
 N_TILES = len(TILES)
 
-# ---- BFS on 4-connected grid, walls are blocked ----
+# ---- BFS on 4-connected grid, walls and movable obstacles are blocked ----
 def shortest_path_len(grid: np.ndarray, start, goal) -> int | None:
     H, W = grid.shape
     (sy, sx), (gy, gx) = start, goal
@@ -30,7 +30,8 @@ def shortest_path_len(grid: np.ndarray, start, goal) -> int | None:
                 continue
             if seen[ny, nx]:
                 continue
-            if grid[ny, nx] == WALL:
+            # Both WALL and MOVABLE block pathfinding
+            if grid[ny, nx] == WALL or grid[ny, nx] == MOVABLE:
                 continue
             if (ny, nx) == (gy, gx):
                 return d + 1
@@ -45,10 +46,11 @@ class GridPCGEnv(gym.Env):
 
     - No SUBMIT: episodes last exactly `max_steps`.
     - Unique entities with "move semantics": placing ROBOT/OBJECT/GOAL moves (or creates) that entity.
-    - WALL cannot overwrite an entity.
+    - WALL and MOVABLE cannot overwrite an entity.
     - Final reward at episode end (solvability + shaping), plus small per-step shaping.
-    - Observation: H x W x 5 (one-hot planes for [EMPTY, WALL, ROBOT, OBJECT, GOAL]).
-    - Action: Discrete(H * W * 5): (y, x, tile_type).
+    - Observation: H x W x 6 (one-hot planes for [EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE]).
+    - Action: Discrete(H * W * 6): (y, x, tile_type).
+    - MOVABLE obstacles block pathfinding like walls, but are tracked separately for reward shaping.
     """
 
     metadata = {"render_modes": []}
@@ -83,6 +85,10 @@ class GridPCGEnv(gym.Env):
         self.lambda_corridor_step = 0.25   # tiny incremental reward for more adjacency per wall
         self.lambda_isolated_term = 0.9    # terminal penalty for isolated walls
         self.lambda_block_term = 0.3    # terminal penalty for 2x2 wall blocks
+        
+        # movable obstacle reward shaping
+        self.lambda_movable = 0.4  # bonus for having movable obstacles (terminal)
+        self.movable_desired_count = 2.5  # target number of movables for bonus scaling
 
         # per-step coax toward "some walls" after all 3 entities exist
         self.wall_step_coax = 0.06
@@ -169,34 +175,53 @@ class GridPCGEnv(gym.Env):
         return pen
 
     def _wall_stats(self):
-        g = (self.grid == WALL).astype(np.int32)
-        n_walls = int(g.sum())
-        if n_walls == 0:
-            return dict(n_walls=0, ratio=0.0, n_isolated=0, n_adj_pairs=0, n_2x2=0)
+        """
+        Compute statistics for walls and movable obstacles.
+        Returns stats for combined solid mask (walls + movables) and separately for movables.
+        """
+        # Combined solid mask (walls + movables) for corridor structure
+        g_solid = ((self.grid == WALL) | (self.grid == MOVABLE)).astype(np.int32)
+        n_solid = int(g_solid.sum())
+        
+        # Separate counts
+        n_walls = int(np.sum(self.grid == WALL))
+        n_movable = int(np.sum(self.grid == MOVABLE))
+        
+        if n_solid == 0:
+            return dict(
+                n_walls=n_walls, n_movable=n_movable, n_solid=0,
+                ratio=0.0, solid_ratio=0.0, movable_ratio=0.0,
+                n_isolated=0, n_adj_pairs=0, n_2x2=0
+            )
 
-        # 4-neighborhood adjacency
-        up = g[:-1, :] * g[1:, :]
-        left = g[:, :-1] * g[:, 1:]
+        # 4-neighborhood adjacency on combined solid mask
+        up = g_solid[:-1, :] * g_solid[1:, :]
+        left = g_solid[:, :-1] * g_solid[:, 1:]
         n_adj_pairs = int(up.sum() + left.sum())
 
-        deg = np.zeros_like(g, dtype=np.int32)
-        deg[1:,  :] += g[:-1, :]
-        deg[:-1, :] += g[1:,  :]
-        deg[:, 1:]  += g[:, :-1]
-        deg[:, :-1] += g[:, 1:]
-        n_isolated = int(((g == 1) & (deg == 0)).sum())
+        deg = np.zeros_like(g_solid, dtype=np.int32)
+        deg[1:,  :] += g_solid[:-1, :]
+        deg[:-1, :] += g_solid[1:,  :]
+        deg[:, 1:]  += g_solid[:, :-1]
+        deg[:, :-1] += g_solid[:, 1:]
+        n_isolated = int(((g_solid == 1) & (deg == 0)).sum())
 
-        n_2x2 = int((g[:-1, :-1] * g[1:, :-1] * g[:-1, 1:] * g[1:, 1:]).sum())
-        ratio = n_walls / float(self.h * self.w)
+        n_2x2 = int((g_solid[:-1, :-1] * g_solid[1:, :-1] * g_solid[:-1, 1:] * g_solid[1:, 1:]).sum())
+        
+        ratio = n_walls / float(self.h * self.w)  # wall ratio (for backward compat)
+        solid_ratio = n_solid / float(self.h * self.w)  # combined solid ratio
+        movable_ratio = n_movable / float(self.h * self.w)
 
         return dict(
-            n_walls=n_walls, ratio=ratio,
+            n_walls=n_walls, n_movable=n_movable, n_solid=n_solid,
+            ratio=ratio, solid_ratio=solid_ratio, movable_ratio=movable_ratio,
             n_isolated=n_isolated, n_adj_pairs=n_adj_pairs, n_2x2=n_2x2
         )
 
     def _free_space_components(self):
         H, W = self.h, self.w
-        blocked = (self.grid == WALL)
+        # Both WALL and MOVABLE block free space connectivity
+        blocked = (self.grid == WALL) | (self.grid == MOVABLE)
         seen = np.zeros((H, W), dtype=bool)
         comps = 0
         for y in range(H):
@@ -222,7 +247,10 @@ class GridPCGEnv(gym.Env):
             "valid": 0, "L1": 0, "L2": 0,
             "wall_ratio": wall_ratio_observed,
             "adj_per_wall": 0.0,
-            "iso_frac": 0.0
+            "iso_frac": 0.0,
+            "n_movable": 0,
+            "movable_ratio": 0.0,
+            "solid_ratio": 0.0
         }
 
         if not self._valid_final():
@@ -246,29 +274,39 @@ class GridPCGEnv(gym.Env):
         if max(abs(oy - gy), abs(ox - gx)) <= 1:
             adj_trivial = 1.0
 
-        # wall target penalty, curved
+        # wall/obstacle stats (includes combined solid mask)
         ws = self._wall_stats()
-        wr = ws["ratio"]
-        wall_dev = abs(wr - self.wall_target)
+        n_movable = ws["n_movable"]
+        solid_ratio = ws["solid_ratio"]
+        wr = ws["ratio"]  # wall ratio (for backward compat)
+        
+        # Use solid_ratio for target penalty (walls + movables combined)
+        wall_dev = abs(solid_ratio - self.wall_target)
 
-        # small bonus if we land inside the [0.18, 0.32] band
-        band_bonus = 0.5 if (self._wall_band_lo <= wr <= self._wall_band_hi) else -0.5
+        # small bonus if we land inside the [0.18, 0.32] band (using solid ratio)
+        band_bonus = 0.5 if (self._wall_band_lo <= solid_ratio <= self._wall_band_hi) else -0.5
 
         # curved penalty away from target (keeps learning pressure outside band)
         wall_term = band_bonus - self.beta * (wall_dev ** 1.5) * 2.0
 
-        # corridor quality
-        if ws["n_walls"] > 0:
-            adj_per_wall = ws["n_adj_pairs"] / float(ws["n_walls"])
-            iso_frac = ws["n_isolated"] / float(ws["n_walls"])
+        # corridor quality (using combined solid mask)
+        if ws["n_solid"] > 0:
+            adj_per_wall = ws["n_adj_pairs"] / float(ws["n_solid"])
+            iso_frac = ws["n_isolated"] / float(ws["n_solid"])
         else:
             adj_per_wall, iso_frac = 0.0, 0.0
 
         corridor_term = (
                 + self.lambda_corridor_term * adj_per_wall
                 - self.lambda_isolated_term * iso_frac
-                - self.lambda_block_term * (ws["n_2x2"] / max(1, ws["n_walls"]))
+                - self.lambda_block_term * (ws["n_2x2"] / max(1, ws["n_solid"]))
         )
+
+        # Movable obstacle bonus (encourage having some movables)
+        movable_bonus = 0.0
+        if n_movable > 0:
+            # Scale bonus based on how close we are to desired count
+            movable_bonus = self.lambda_movable * min(n_movable / self.movable_desired_count, 1.0)
 
         border_pen = self._border_penalty(margin=1)
         free_comps = self._free_space_components()
@@ -278,16 +316,20 @@ class GridPCGEnv(gym.Env):
              + self.alpha * (L1 + L2)
              + wall_term
              + corridor_term
+             + movable_bonus
              - self.gamma * adj_trivial
              - self.delta * border_pen
              - free_space_pen)
-        if ws["n_walls"] == 0:
-            R -= 0.5  # endings with zero walls should be clearly worse
+        if ws["n_solid"] == 0:
+            R -= 0.5  # endings with zero solid obstacles should be clearly worse
         metrics.update({
             "valid": 1, "L1": int(L1), "L2": int(L2),
             "wall_ratio": wr,
             "adj_per_wall": adj_per_wall,
-            "iso_frac": iso_frac
+            "iso_frac": iso_frac,
+            "n_movable": n_movable,
+            "movable_ratio": ws["movable_ratio"],
+            "solid_ratio": solid_ratio
         })
         return float(R), metrics
 
@@ -352,10 +394,10 @@ class GridPCGEnv(gym.Env):
         prev_spread = spread_total()
 
         prev_stats = self._wall_stats()
-        prev_adj_per_wall = (prev_stats["n_adj_pairs"] / float(prev_stats["n_walls"])
-                             if prev_stats["n_walls"] > 0 else 0.0)
-        prev_iso_frac = (prev_stats["n_isolated"] / float(prev_stats["n_walls"])
-                         if prev_stats["n_walls"] > 0 else 0.0)
+        prev_adj_per_wall = (prev_stats["n_adj_pairs"] / float(prev_stats["n_solid"])
+                             if prev_stats["n_solid"] > 0 else 0.0)
+        prev_iso_frac = (prev_stats["n_isolated"] / float(prev_stats["n_solid"])
+                         if prev_stats["n_solid"] > 0 else 0.0)
 
         # apply edit
         if t in (ROBOT, OBJECT, GOAL):
@@ -371,9 +413,27 @@ class GridPCGEnv(gym.Env):
                 reward -= 0.01
             else:
                 self.grid[y, x] = WALL
+        elif t == MOVABLE:
+            # Movable obstacles: cannot overwrite entities, can replace walls or empty cells
+            if self.grid[y, x] in (ROBOT, OBJECT, GOAL):
+                reward -= 0.03  # slightly stronger penalty than wall (movables are more "interesting")
+            elif self.grid[y, x] == MOVABLE:
+                reward -= 0.01  # redundant placement
+            elif self.grid[y, x] == WALL:
+                # Allow converting wall to movable (neutral or small positive)
+                self.grid[y, x] = MOVABLE
+                reward += 0.01
+            else:  # EMPTY
+                # Place movable on empty cell
+                self.grid[y, x] = MOVABLE
+                reward += 0.04  # slightly higher than wall placement since movables are more interesting
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
                 reward -= 0.01
+            elif self.grid[y, x] == MOVABLE:
+                # Removing a movable (placing EMPTY on MOVABLE)
+                self.grid[y, x] = EMPTY
+                reward -= 0.02  # mild penalty for removing movables
             else:
                 self.grid[y, x] = EMPTY
 
@@ -381,6 +441,7 @@ class GridPCGEnv(gym.Env):
         if not changed:
             reward -= 0.02
         else:
+            # Wall placement shaping (existing logic)
             if t == WALL and self.grid[y, x] == WALL:
                 # neighbors
                 H, W = self.h, self.w
@@ -414,6 +475,36 @@ class GridPCGEnv(gym.Env):
                 if makes_2x2:
                     reward -= 0.03
                 reward += 0.03  # was 0.01
+            
+            # Movable placement shaping (similar to walls but using combined solid mask)
+            if t == MOVABLE and self.grid[y, x] == MOVABLE:
+                H, W = self.h, self.w
+                # Use combined solid mask (walls + movables) for adjacency checks
+                g_solid = ((self.grid == WALL) | (self.grid == MOVABLE)).astype(np.int32)
+                
+                deg = 0
+                for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                    ny, nx = y+dy, x+dx
+                    if 0 <= ny < H and 0 <= nx < W and g_solid[ny, nx]:
+                        deg += 1
+                
+                # Similar corridor shaping for movables
+                if deg == 1:
+                    reward += 0.03
+                elif deg == 2:
+                    straight = (0 < y < H-1 and g_solid[y-1, x] and g_solid[y+1, x]) or (0 < x < W-1 and g_solid[y, x-1] and g_solid[y, x+1])
+                    reward += 0.035 if straight else 0.02
+                if deg == 0:
+                    reward -= 0.03
+                makes_2x2 = (
+                        (y > 0 and x > 0 and g_solid[y-1, x] and g_solid[y, x-1] and g_solid[y-1, x-1]) or
+                        (y > 0 and x < W-1 and g_solid[y-1, x] and g_solid[y, x+1] and g_solid[y-1, x+1]) or
+                        (y < H-1 and x > 0 and g_solid[y+1, x] and g_solid[y, x-1] and g_solid[y+1, x-1]) or
+                        (y < H-1 and x < W-1 and g_solid[y+1, x] and g_solid[y, x+1] and g_solid[y+1, x+1])
+                )
+                if makes_2x2:
+                    reward -= 0.03
+            
             # discourage deleting walls without reason (WALL -> EMPTY)
             if t == EMPTY and prev_grid[y, x] == WALL and self.grid[y, x] == EMPTY:
                 reward -= 0.03
@@ -426,11 +517,12 @@ class GridPCGEnv(gym.Env):
         if new_had_O and not had_O: reward += 0.25
         if new_had_G and not had_G: reward += 0.25
 
-        # coax toward some walls once valid
+        # coax toward some walls/obstacles once valid (using solid ratio)
         now_valid = self._valid_final()
         if now_valid:
-            wr = float(np.mean(self.grid == WALL))
-            reward += self.wall_step_coax * min(wr / self.wall_target, 1.0)
+            # Use combined solid ratio (walls + movables) for coaxing
+            solid_r = float(np.mean((self.grid == WALL) | (self.grid == MOVABLE)))
+            reward += self.wall_step_coax * min(solid_r / self.wall_target, 1.0)
             if t in (ROBOT, GOAL, OBJECT):
                 reward -= 0.02
 
@@ -453,11 +545,11 @@ class GridPCGEnv(gym.Env):
             reward += self.first_valid_bonus
         self._was_valid = now_valid
 
-        # incremental corridor shaping
+        # incremental corridor shaping (using combined solid mask)
         new_stats = self._wall_stats()
-        if new_stats["n_walls"] > 0:
-            new_adj_per_wall = new_stats["n_adj_pairs"] / float(new_stats["n_walls"])
-            new_iso_frac = new_stats["n_isolated"] / float(new_stats["n_walls"])
+        if new_stats["n_solid"] > 0:
+            new_adj_per_wall = new_stats["n_adj_pairs"] / float(new_stats["n_solid"])
+            new_iso_frac = new_stats["n_isolated"] / float(new_stats["n_solid"])
             if new_adj_per_wall > prev_adj_per_wall:
                 reward += self.lambda_corridor_step
             elif new_adj_per_wall < prev_adj_per_wall:
@@ -487,5 +579,5 @@ class GridPCGEnv(gym.Env):
         return self._obs(), float(reward), terminated, truncated, info
 
     def render(self):
-        chars = {EMPTY: ".", WALL: "#", ROBOT: "R", OBJECT: "O", GOAL: "G"}
-        print("\n".join("".join(chars[int(self.grid[y, x])] for x in range(self.w)) for y in range(self.h)))
+        chars = {EMPTY: ".", WALL: "#", ROBOT: "R", OBJECT: "O", GOAL: "G", MOVABLE: "M"}
+        print("\n".join("".join(chars.get(int(self.grid[y, x]), "?") for x in range(self.w)) for y in range(self.h)))
