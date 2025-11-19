@@ -148,8 +148,8 @@ def main():
 
     # --------- learn ---------
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks, reset_num_timesteps=not args.resume)
-    model.save(os.path.join(args.logdir, "ppo_grid_nomask_final"))
-    print(f"Saved final model to: {args.logdir}/ppo_grid_nomask_final.zip")
+    model.save(os.path.join(args.logdir, "ppo_grid_movable"))
+    print(f"Saved final model to: {args.logdir}/ppo_grid_movable.zip")
 
     # close cleanly
     train_env.close()
