@@ -151,7 +151,7 @@ class GridPCGEnv(gym.Env):
         self.lambda_path_obstruction = 0.5 # Bonus if blocked path > static path
 
         # per-step coax toward "some walls" after all 3 entities exist
-        self.wall_step_coax = 0.15 # Increased from 0.06 to force wall building
+        self.wall_step_coax = 0.30 # V4: Massive boost (was 0.15)
         # useful band for final wall ratio bonus
         self._wall_band_lo = 0.20
         self._wall_band_hi = 0.50
@@ -359,10 +359,9 @@ class GridPCGEnv(gym.Env):
         # small bonus if we land inside the [0.18, 0.32] band (using WALL ratio)
         band_bonus = 0.5 if (self._wall_band_lo <= wr <= self._wall_band_hi) else -0.5
 
-        # LINEAR penalty away from target (V3: Aggressive wall enforcement)
-        # was curved: - self.beta * (wall_dev ** 1.5) * 3.0
-        # Now: - 2.5 * wall_dev. If wall_ratio is 0.05 (dev 0.2), penalty is -0.5.
-        wall_term = band_bonus - 2.5 * wall_dev
+        # LINEAR penalty away from target (V4: EXTREME wall enforcement)
+        # If wall_ratio is 0.05 (dev 0.2), penalty is -1.0.
+        wall_term = band_bonus - 5.0 * wall_dev
 
         # corridor quality
         if ws["n_solid"] > 0:
@@ -383,14 +382,12 @@ class GridPCGEnv(gym.Env):
         # Target 7, sigma 2.5 gives good rewards for 4-10 range.
         movable_count_term = 0.0
         if n_movable > 0:
-            sigma = 2.5
-            diff = n_movable - self.movable_desired_count
-            # Gaussian bell curve
-            movable_count_term = self.lambda_movable * np.exp(-0.5 * (diff / sigma)**2)
-            
-            # Extra penalty for excessive movables (> 12)
-            if n_movable > 12:
-                movable_count_term -= 0.1 * (n_movable - 12)
+            if 4 <= n_movable <= 10:
+                movable_count_term = self.lambda_movable # Max bonus in range
+            else:
+                # Linear penalty outside range
+                diff = min(abs(n_movable - 4), abs(n_movable - 10))
+                movable_count_term = -0.1 * diff
         
         # B. On-Path Reward
         # Identify cells on the STATIC shortest path
@@ -560,6 +557,7 @@ class GridPCGEnv(gym.Env):
                 reward -= 0.01
             else:
                 self.grid[y, x] = WALL
+                reward += 0.05 # V4: Explicit bonus for placing a wall
         elif t == MOVABLE:
             # Movable obstacles: cannot overwrite entities, can replace walls or empty cells
             if self.grid[y, x] in (ROBOT, OBJECT, GOAL):
