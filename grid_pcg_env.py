@@ -147,13 +147,13 @@ class GridPCGEnv(gym.Env):
         # movable obstacle reward shaping
         # movable obstacle reward shaping
         self.lambda_movable = 0.5  # bonus for having movable obstacles (terminal)
-        self.movable_desired_count = 7.0  # target ~7 movables (range 4-10)
+        self.movable_desired_count = 5.0  # target ~5 movables (range 3-7)
         
         # New movable-specific weights
-        self.lambda_movable_on_path = 1.0  # Strong bonus for movable being on the static path
-        self.lambda_movable_off_path = 0.1 # Penalty for movable NOT on path
+        self.lambda_movable_on_path = 2.0  # V7: Dominant bonus for movable being on the static path
+        self.lambda_movable_off_path = 0.5 # V7: Strong penalty for movable NOT on path
         self.lambda_boxed = 0.2            # Penalty for boxed-in movables
-        self.lambda_path_obstruction = 0.5 # Bonus if blocked path > static path
+        self.lambda_path_obstruction = 1.0 # V7: Strong bonus if blocked path > static path
 
         # per-step coax toward "some walls" after all 3 entities exist
         self.wall_step_coax = 0.30 # V4: Massive boost (was 0.15)
@@ -199,11 +199,11 @@ class GridPCGEnv(gym.Env):
         if self.progress < 0.5:
             self._cur_movable_target = 0.0
         elif self.progress < 0.8:
-            # Linear ramp 0 -> 7
+            # Linear ramp 0 -> 5
             ratio = (self.progress - 0.5) / 0.3
-            self._cur_movable_target = 0.0 + ratio * 7.0
+            self._cur_movable_target = 0.0 + ratio * 5.0
         else:
-            self._cur_movable_target = 7.0
+            self._cur_movable_target = 5.0
 
     # ---------- helpers ----------
     def _obs(self) -> np.ndarray:
@@ -425,16 +425,16 @@ class GridPCGEnv(gym.Env):
             if n_movable > 0:
                 movable_count_term = -0.1 * n_movable
         elif n_movable > 0:
-            # Target range: target +/- 3
-            t_min = max(1, self._cur_movable_target - 3)
-            t_max = self._cur_movable_target + 3
+            # Target range: target +/- 2 (tighter range for V7)
+            t_min = max(1, self._cur_movable_target - 2)
+            t_max = self._cur_movable_target + 2
             
             if t_min <= n_movable <= t_max:
                 movable_count_term = self.lambda_movable # Max bonus in range
             else:
                 # Linear penalty outside range
                 diff = min(abs(n_movable - t_min), abs(n_movable - t_max))
-                movable_count_term = -0.1 * diff
+                movable_count_term = -0.2 * diff # Stricter penalty
         
         # B. On-Path Reward
         # Identify cells on the STATIC shortest path
@@ -627,18 +627,18 @@ class GridPCGEnv(gym.Env):
                 reward += 0.01
                 # Bonus if this new movable is on the static path
                 if (y, x) in path_cells_static:
-                    reward += 0.08
+                    reward += 0.15 # V7: Increased bonus
                 else:
-                    reward -= 0.02 # Penalty for off-path
+                    reward -= 0.05 # V7: Increased penalty
             else:  # EMPTY
                 # Place movable on empty cell
                 self.grid[y, x] = MOVABLE
                 reward += 0.02
                 # Strong bonus if placed on the static path
                 if (y, x) in path_cells_static:
-                    reward += 0.10
+                    reward += 0.20 # V7: Increased bonus
                 else:
-                    reward -= 0.03 # Penalty for off-path
+                    reward -= 0.05 # V7: Increased penalty
                 
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
