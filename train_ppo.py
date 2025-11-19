@@ -6,7 +6,7 @@ import torch
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.logger import configure
 
 from grid_pcg_env import GridPCGEnv
@@ -64,7 +64,6 @@ def main():
     p.add_argument("--logdir", type=str, default="runs/ppo_grid_corridors_v2")
     p.add_argument("--no_tb", action="store_true")
     p.add_argument("--resume", type=str, default=None, help="Path to a .zip model to resume from")
-    p.add_argument("--checkpoint_every", type=int, default=200_000)
     p.add_argument("--eval_every", type=int, default=50_000)
     p.add_argument("--eval_episodes", type=int, default=32)
     p.add_argument("--pause_after", type=int, default=0, help="Hard stop after this many env steps (0=off)")
@@ -126,7 +125,7 @@ def main():
             policy_kwargs=policy_kwargs,
         )
 
-    # --------- callbacks (eval + checkpoints + optional pause) ---------
+    # --------- callbacks (eval + optional pause) ---------
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path=args.logdir,
@@ -135,14 +134,8 @@ def main():
         n_eval_episodes=args.eval_episodes,
         deterministic=False,
     )
-    ckpt_cb = CheckpointCallback(
-        save_freq=max(args.checkpoint_every // args.n_envs, 1),
-        save_path=args.logdir,
-        name_prefix="ppo_ckpt",
-        save_replay_buffer=False,
-        save_vecnormalize=False,
-    )
-    callbacks = [eval_cb, ckpt_cb]
+
+    callbacks = [eval_cb]
     if args.pause_after > 0:
         callbacks.append(StopAfterSteps(args.pause_after))
 

@@ -151,7 +151,7 @@ class GridPCGEnv(gym.Env):
         self.lambda_path_obstruction = 0.5 # Bonus if blocked path > static path
 
         # per-step coax toward "some walls" after all 3 entities exist
-        self.wall_step_coax = 0.06
+        self.wall_step_coax = 0.15 # Increased from 0.06 to force wall building
         # useful band for final wall ratio bonus
         self._wall_band_lo = 0.20
         self._wall_band_hi = 0.50
@@ -359,8 +359,10 @@ class GridPCGEnv(gym.Env):
         # small bonus if we land inside the [0.18, 0.32] band (using WALL ratio)
         band_bonus = 0.5 if (self._wall_band_lo <= wr <= self._wall_band_hi) else -0.5
 
-        # curved penalty away from target
-        wall_term = band_bonus - self.beta * (wall_dev ** 1.5) * 3.0 # Increased weight
+        # LINEAR penalty away from target (V3: Aggressive wall enforcement)
+        # was curved: - self.beta * (wall_dev ** 1.5) * 3.0
+        # Now: - 2.5 * wall_dev. If wall_ratio is 0.05 (dev 0.2), penalty is -0.5.
+        wall_term = band_bonus - 2.5 * wall_dev
 
         # corridor quality
         if ws["n_solid"] > 0:
