@@ -141,13 +141,14 @@ class GridPCGEnv(gym.Env):
         
         # movable obstacle reward shaping
         # movable obstacle reward shaping
-        self.lambda_movable = 0.4  # bonus for having movable obstacles (terminal)
-        self.movable_desired_count = 4.5  # target ~4-5 movables
+        self.lambda_movable = 0.5  # bonus for having movable obstacles (terminal)
+        self.movable_desired_count = 7.0  # target ~7 movables (range 4-10)
         
         # New movable-specific weights
-        self.lambda_movable_on_path = 0.6  # Bonus for movable being on the static path
-        self.lambda_boxed = 0.15           # Penalty for boxed-in movables
-        self.lambda_path_obstruction = 0.3 # Bonus if blocked path > static path (it's doing work)
+        self.lambda_movable_on_path = 1.0  # Strong bonus for movable being on the static path
+        self.lambda_movable_off_path = 0.1 # Penalty for movable NOT on path
+        self.lambda_boxed = 0.2            # Penalty for boxed-in movables
+        self.lambda_path_obstruction = 0.5 # Bonus if blocked path > static path
 
         # per-step coax toward "some walls" after all 3 entities exist
         self.wall_step_coax = 0.06
@@ -351,14 +352,15 @@ class GridPCGEnv(gym.Env):
         solid_ratio = ws["solid_ratio"]
         wr = ws["ratio"]
         
-        # Use solid_ratio for target penalty (walls + movables combined)
-        wall_dev = abs(solid_ratio - self.wall_target)
+        # STRICTLY target wall ratio (walls only) to force structure
+        # Previous logic used solid_ratio which allowed movables to substitute for walls.
+        wall_dev = abs(wr - self.wall_target)
 
-        # small bonus if we land inside the [0.18, 0.32] band (using solid ratio)
-        band_bonus = 0.5 if (self._wall_band_lo <= solid_ratio <= self._wall_band_hi) else -0.5
+        # small bonus if we land inside the [0.18, 0.32] band (using WALL ratio)
+        band_bonus = 0.5 if (self._wall_band_lo <= wr <= self._wall_band_hi) else -0.5
 
         # curved penalty away from target
-        wall_term = band_bonus - self.beta * (wall_dev ** 1.5) * 2.0
+        wall_term = band_bonus - self.beta * (wall_dev ** 1.5) * 3.0 # Increased weight
 
         # corridor quality
         if ws["n_solid"] > 0:
@@ -376,13 +378,17 @@ class GridPCGEnv(gym.Env):
         # --- Movable Logic ---
         
         # A. Quantity Reward (Bell curve around target)
-        # Using a Gaussian-like shape: exp(-0.5 * ((x - target) / sigma)^2)
-        # sigma=1.5 means 3-6 is the "good" range.
+        # Target 7, sigma 2.5 gives good rewards for 4-10 range.
         movable_count_term = 0.0
         if n_movable > 0:
-            sigma = 1.5
+            sigma = 2.5
             diff = n_movable - self.movable_desired_count
+            # Gaussian bell curve
             movable_count_term = self.lambda_movable * np.exp(-0.5 * (diff / sigma)**2)
+            
+            # Extra penalty for excessive movables (> 12)
+            if n_movable > 12:
+                movable_count_term -= 0.1 * (n_movable - 12)
         
         # B. On-Path Reward
         # Identify cells on the STATIC shortest path
@@ -390,6 +396,7 @@ class GridPCGEnv(gym.Env):
         path_cells |= get_shortest_path_cells(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
         
         n_on_path = 0
+        n_off_path = 0
         n_boxed = 0
         
         # Iterate movables to check path intersection and boxed status
@@ -397,9 +404,10 @@ class GridPCGEnv(gym.Env):
         for my, mx in zip(ys, xs):
             if (my, mx) in path_cells:
                 n_on_path += 1
+            else:
+                n_off_path += 1
             
             # Check if boxed (3+ neighbors are solid)
-            # Note: self is solid (MOVABLE), so we check neighbors
             deg = 0
             for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
                 ny, nx = my+dy, mx+dx
@@ -413,6 +421,7 @@ class GridPCGEnv(gym.Env):
 
         movable_quality_term = (
             + self.lambda_movable_on_path * n_on_path
+            - self.lambda_movable_off_path * n_off_path
             - self.lambda_boxed * n_boxed
         )
         
@@ -561,14 +570,18 @@ class GridPCGEnv(gym.Env):
                 reward += 0.01
                 # Bonus if this new movable is on the static path
                 if (y, x) in path_cells_static:
-                    reward += 0.05
+                    reward += 0.08
+                else:
+                    reward -= 0.02 # Penalty for off-path
             else:  # EMPTY
                 # Place movable on empty cell
                 self.grid[y, x] = MOVABLE
                 reward += 0.02
                 # Strong bonus if placed on the static path
                 if (y, x) in path_cells_static:
-                    reward += 0.08
+                    reward += 0.10
+                else:
+                    reward -= 0.03 # Penalty for off-path
                 
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
