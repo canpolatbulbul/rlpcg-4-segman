@@ -147,7 +147,11 @@ class GridPCGEnv(gym.Env):
         # movable obstacle reward shaping
         # movable obstacle reward shaping
         self.lambda_movable = 0.5  # bonus for having movable obstacles (terminal)
-        self.movable_desired_count = 5.0  # target ~5 movables (range 3-7)
+        # Scale target count with grid size (approx 3% density)
+        # 13x13 (169) -> ~5.0
+        # 16x16 (256) -> ~7.6
+        # 20x20 (400) -> ~12.0
+        self.movable_desired_count = max(3.0, (self.w * self.h) * 0.03)
         
         # New movable-specific weights
         self.lambda_movable_on_path = 2.0  # V7: Dominant bonus for movable being on the static path
@@ -199,11 +203,11 @@ class GridPCGEnv(gym.Env):
         if self.progress < 0.5:
             self._cur_movable_target = 0.0
         elif self.progress < 0.8:
-            # Linear ramp 0 -> 5
+            # Linear ramp 0 -> target
             ratio = (self.progress - 0.5) / 0.3
-            self._cur_movable_target = 0.0 + ratio * 5.0
+            self._cur_movable_target = 0.0 + ratio * self.movable_desired_count
         else:
-            self._cur_movable_target = 5.0
+            self._cur_movable_target = self.movable_desired_count
 
     # ---------- helpers ----------
     def _obs(self) -> np.ndarray:
