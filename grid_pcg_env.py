@@ -511,7 +511,8 @@ class GridPCGEnv(gym.Env):
             "movable_ratio": ws["movable_ratio"],
             "solid_ratio": solid_ratio,
             "n_movable_on_path": n_on_path,
-            "n_boxed": n_boxed
+            "n_boxed": n_boxed,
+            "final_grid": self.grid.copy()
         })
         return float(R), metrics
 
