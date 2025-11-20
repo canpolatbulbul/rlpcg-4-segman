@@ -118,18 +118,16 @@ def run_episodes(
                 # final_grid was added in your env on termination:
                 last_grid = final_info.get("final_grid", None)
 
-        if ep % 100 == 0:
-            # Save artifacts every 100 episodes for manual check
-            ep_id = f"{ep:05d}"
-            if last_grid is None:
-                # Try to pull it directly from underlying env (rarely needed)
-                last_grid = vec_env.envs[0].env.env.grid.copy()
+        ep_id = f"{ep:05d}"
+        if last_grid is None:
+            # Try to pull it directly from underlying env (rarely needed)
+            last_grid = vec_env.envs[0].env.env.grid.copy()
 
-            png_path = eps_dir / f"ep_{ep_id}.png"
-            npy_path = eps_dir / f"ep_{ep_id}.npy"
-            title = f"L1={final_info['L1']} L2={final_info['L2']} w={final_info['wall_ratio']:.02f}"
-            save_grid_png(last_grid, png_path, title=title)
-            np.save(npy_path, last_grid)
+        png_path = eps_dir / f"ep_{ep_id}.png"
+        npy_path = eps_dir / f"ep_{ep_id}.npy"
+        title = f"L1={final_info['L1']} L2={final_info['L2']} w={final_info['wall_ratio']:.02f} m={final_info['n_movable']}"
+        save_grid_png(last_grid, png_path, title=title)
+        np.save(npy_path, last_grid)
 
         # Apply selection thresholds
         keep = (
