@@ -82,6 +82,7 @@ def run_episodes(
         "episode", "reward", "valid",
         "L1", "L2", "Lsum",
         "wall_ratio", "adj_per_wall", "iso_frac",
+        "n_movable",
         "png_path", "npy_path", "kept"
     ]
     f = open(csv_path, "w", newline="")
@@ -113,25 +114,28 @@ def run_episodes(
                 final_info.setdefault("wall_ratio", 0.0)
                 final_info.setdefault("adj_per_wall", 0.0)
                 final_info.setdefault("iso_frac", 0.0)
+                final_info.setdefault("n_movable", 0)
                 # final_grid was added in your env on termination:
                 last_grid = final_info.get("final_grid", None)
 
-        # Save artifacts for this episode
-        ep_id = f"{ep:05d}"
-        if last_grid is None:
-            # Try to pull it directly from underlying env (rarely needed)
-            last_grid = vec_env.envs[0].env.env.grid.copy()
+        if ep % 100 == 0:
+            # Save artifacts every 100 episodes for manual check
+            ep_id = f"{ep:05d}"
+            if last_grid is None:
+                # Try to pull it directly from underlying env (rarely needed)
+                last_grid = vec_env.envs[0].env.env.grid.copy()
 
-        png_path = eps_dir / f"ep_{ep_id}.png"
-        npy_path = eps_dir / f"ep_{ep_id}.npy"
-        title = f"L1={final_info['L1']} L2={final_info['L2']} w={final_info['wall_ratio']:.02f}"
-        save_grid_png(last_grid, png_path, title=title)
-        np.save(npy_path, last_grid)
+            png_path = eps_dir / f"ep_{ep_id}.png"
+            npy_path = eps_dir / f"ep_{ep_id}.npy"
+            title = f"L1={final_info['L1']} L2={final_info['L2']} w={final_info['wall_ratio']:.02f}"
+            save_grid_png(last_grid, png_path, title=title)
+            np.save(npy_path, last_grid)
 
         # Apply selection thresholds
         keep = (
                 (final_info["valid"] == 1) and
                 (thresholds["w_min"] <= final_info["wall_ratio"] <= thresholds["w_max"]) and
+                (thresholds["movable_min"] <= final_info["n_movable"] <= thresholds["movable_max"]) and
                 (final_info["adj_per_wall"] >= thresholds["adj_min"]) and
                 (final_info["iso_frac"] <= thresholds["iso_max"]) and
                 ((final_info["L1"] + final_info["L2"]) >= thresholds["min_Lsum"])
@@ -152,6 +156,7 @@ def run_episodes(
             "wall_ratio": final_info["wall_ratio"],
             "adj_per_wall": final_info["adj_per_wall"],
             "iso_frac": final_info["iso_frac"],
+            "n_movable": final_info["n_movable"],
             "png_path": str(png_path),
             "npy_path": str(npy_path),
             "kept": int(keep),
@@ -180,8 +185,10 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
 
     # Selection thresholds
-    p.add_argument("--w_min", type=float, default=0.18)
-    p.add_argument("--w_max", type=float, default=0.32)
+    p.add_argument("--w_min", type=float, default=0.20)
+    p.add_argument("--w_max", type=float, default=0.30)
+    p.add_argument("--movable_min", type=int, default=3)
+    p.add_argument("--movable_max", type=int, default=7)
     p.add_argument("--adj_min", type=float, default=0.15)
     p.add_argument("--iso_max", type=float, default=0.30)
     p.add_argument("--min_Lsum", type=int, default=14)
@@ -192,6 +199,7 @@ if __name__ == "__main__":
     args = parse_args()
     thresholds = dict(
         w_min=args.w_min, w_max=args.w_max,
+        movable_min=args.movable_min, movable_max=args.movable_max,
         adj_min=args.adj_min, iso_max=args.iso_max,
         min_Lsum=args.min_Lsum,
     )
