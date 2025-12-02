@@ -7,6 +7,9 @@ __pycache__/
 .env
 *.ipynb_checkpoints
 
+fikir.txt
+*.pdf
+
 # OS/editor
 .DS_Store
 *.swp
