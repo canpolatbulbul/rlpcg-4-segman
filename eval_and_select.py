@@ -12,6 +12,12 @@ from typing import Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
@@ -90,6 +96,8 @@ def run_episodes(
         "L1", "L2", "Lsum",
         "wall_ratio", "adj_per_wall", "iso_frac",
         "n_movable", "n_movable_on_path",
+        "relaxed_solvable", "strict_solvable", "movable_critical",
+        "L1_relaxed", "L2_relaxed", "L1_strict", "L2_strict",
         "png_path", "npy_path", "kept"
     ]
     f = open(csv_path, "w", newline="")
@@ -134,6 +142,13 @@ def run_episodes(
                 final_info.setdefault("iso_frac", 0.0)
                 final_info.setdefault("n_movable", 0)
                 final_info.setdefault("n_movable_on_path", 0)
+                final_info.setdefault("relaxed_solvable", False)
+                final_info.setdefault("strict_solvable", False)
+                final_info.setdefault("movable_critical", False)
+                final_info.setdefault("L1_relaxed", 0)
+                final_info.setdefault("L2_relaxed", 0)
+                final_info.setdefault("L1_strict", None)
+                final_info.setdefault("L2_strict", None)
                 
                 # Get grid from info (crucial for SubprocVecEnv)
                 last_grid = final_info.get("final_grid", None)
@@ -150,6 +165,7 @@ def run_episodes(
                 ep_id = f"{ep_counts:05d}"
 
                 # Apply selection thresholds
+                # Optionally require movable-critical condition
                 keep = (
                         (final_info["valid"] == 1) and
                         (thresholds["w_min"] <= final_info["wall_ratio"] <= thresholds["w_max"]) and
@@ -161,6 +177,7 @@ def run_episodes(
                         (final_info["L1"] >= thresholds["min_L1"]) and
                         (final_info["L2"] >= thresholds["min_L2"])
                 )
+                # Optionally add: and final_info.get("movable_critical", False)
 
                 png_path = ""
                 npy_path = ""
@@ -186,6 +203,13 @@ def run_episodes(
                     "iso_frac": final_info["iso_frac"],
                     "n_movable": final_info["n_movable"],
                     "n_movable_on_path": final_info["n_movable_on_path"],
+                    "relaxed_solvable": int(final_info.get("relaxed_solvable", False)),
+                    "strict_solvable": int(final_info.get("strict_solvable", False)),
+                    "movable_critical": int(final_info.get("movable_critical", False)),
+                    "L1_relaxed": final_info.get("L1_relaxed", 0),
+                    "L2_relaxed": final_info.get("L2_relaxed", 0),
+                    "L1_strict": final_info.get("L1_strict", ""),
+                    "L2_strict": final_info.get("L2_strict", ""),
                     "png_path": str(png_path),
                     "npy_path": str(npy_path),
                     "kept": int(keep),
@@ -196,6 +220,33 @@ def run_episodes(
 
     f.close()
     vec_env.close()
+    
+    # Read CSV and print summary statistics
+    if HAS_PANDAS:
+        try:
+        df = pd.read_csv(csv_path)
+        valid_count = df["valid"].sum()
+        relaxed_count = df["relaxed_solvable"].sum() if "relaxed_solvable" in df.columns else 0
+        strict_count = df["strict_solvable"].sum() if "strict_solvable" in df.columns else 0
+        critical_count = df["movable_critical"].sum() if "movable_critical" in df.columns else 0
+        kept_count = df["kept"].sum()
+        
+        print(f"\n=== Summary Statistics ===")
+        print(f"Total episodes: {episodes}")
+        print(f"Valid levels: {valid_count} ({100.0*valid_count/episodes:.1f}%)")
+        if "relaxed_solvable" in df.columns:
+            print(f"Relaxed solvable: {relaxed_count} ({100.0*relaxed_count/episodes:.1f}%)")
+        if "strict_solvable" in df.columns:
+            print(f"Strict solvable: {strict_count} ({100.0*strict_count/episodes:.1f}%)")
+        if "movable_critical" in df.columns:
+            critical_pct = 100.0 * critical_count / max(1, valid_count)
+            print(f"Movable-critical: {critical_count}/{valid_count} ({critical_pct:.1f}% of valid levels)")
+        print(f"Keepers (passed thresholds): {kept_count} ({100.0*kept_count/episodes:.1f}%)")
+        except Exception as e:
+            print(f"Could not generate summary statistics: {e}")
+    else:
+        print("(Install pandas for summary statistics)")
+    
     print(f"\nDone. Saved CSV to: {csv_path}")
     print(f"Keepers saved in: {keep_dir}")
 

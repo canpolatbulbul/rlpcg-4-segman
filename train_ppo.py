@@ -3,6 +3,7 @@ import os
 import argparse
 import math
 import torch
+import numpy as np
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
@@ -56,6 +57,64 @@ class CurriculumCallback(BaseCallback):
         # We use env_method to call set_progress on the underlying GridPCGEnv
         self.training_env.env_method("set_progress", progress)
         return True
+
+
+class MetricsCallback(BaseCallback):
+    """
+    Aggregates and logs custom metrics from episode info dicts.
+    Tracks movable-critical percentage, solvability rates, etc.
+    """
+    def __init__(self, log_freq: int = 1000, verbose: int = 0):
+        super().__init__(verbose)
+        self.log_freq = log_freq
+        self.episode_infos = []
+        
+    def _on_step(self) -> bool:
+        # Collect info from completed episodes
+        if self.locals.get("infos") is not None:
+            for info in self.locals["infos"]:
+                if isinstance(info, dict) and info.get("valid") is not None:
+                    # Only log terminal info (when episode ends)
+                    if "final_grid" in info or "movable_critical" in info:
+                        self.episode_infos.append(info)
+        
+        # Log aggregated metrics periodically
+        if len(self.episode_infos) >= self.log_freq:
+            self._log_metrics()
+            self.episode_infos.clear()
+            
+        return True
+    
+    def _log_metrics(self):
+        """Aggregate and log metrics to TensorBoard."""
+        if not self.episode_infos:
+            return
+            
+        n = len(self.episode_infos)
+        
+        # Movable-critical metrics
+        movable_critical_count = sum(1 for info in self.episode_infos if info.get("movable_critical", False))
+        relaxed_solvable_count = sum(1 for info in self.episode_infos if info.get("relaxed_solvable", False))
+        strict_solvable_count = sum(1 for info in self.episode_infos if info.get("strict_solvable", False))
+        valid_count = sum(1 for info in self.episode_infos if info.get("valid", 0) == 1)
+        
+        # Average path lengths
+        l1_relaxed_avg = np.mean([info.get("L1_relaxed", 0) for info in self.episode_infos if info.get("L1_relaxed", 0) > 0])
+        l2_relaxed_avg = np.mean([info.get("L2_relaxed", 0) for info in self.episode_infos if info.get("L2_relaxed", 0) > 0])
+        
+        # Average wall/movable stats
+        wall_ratio_avg = np.mean([info.get("wall_ratio", 0.0) for info in self.episode_infos])
+        n_movable_avg = np.mean([info.get("n_movable", 0) for info in self.episode_infos])
+        
+        # Log to TensorBoard
+        self.logger.record("metrics/movable_critical_pct", 100.0 * movable_critical_count / max(1, valid_count))
+        self.logger.record("metrics/relaxed_solvable_pct", 100.0 * relaxed_solvable_count / max(1, n))
+        self.logger.record("metrics/strict_solvable_pct", 100.0 * strict_solvable_count / max(1, n))
+        self.logger.record("metrics/valid_pct", 100.0 * valid_count / max(1, n))
+        self.logger.record("metrics/avg_l1_relaxed", l1_relaxed_avg)
+        self.logger.record("metrics/avg_l2_relaxed", l2_relaxed_avg)
+        self.logger.record("metrics/avg_wall_ratio", wall_ratio_avg)
+        self.logger.record("metrics/avg_n_movable", n_movable_avg)
 
 
 def main():
@@ -157,7 +216,10 @@ def main():
     # Curriculum Callback
     curr_cb = CurriculumCallback(total_timesteps=args.total_timesteps)
     
-    callbacks = [eval_cb, curr_cb]
+    # Metrics Callback (tracks movable-critical percentage, etc.)
+    metrics_cb = MetricsCallback(log_freq=500)  # Log every 500 episodes
+    
+    callbacks = [eval_cb, curr_cb, metrics_cb]
     if args.pause_after > 0:
         callbacks.append(StopAfterSteps(args.pause_after))
 

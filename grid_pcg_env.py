@@ -133,8 +133,14 @@ class GridPCGEnv(gym.Env):
         self.rng = np.random.RandomState(seed if seed is not None else 42)
 
         # -------- reward hyperparams (tuned for stability) --------
-        self.alpha = 0.06       # weight on L1+L2 (path lengths)
-        self.beta = 0.40       # wall-density penalty weight (terminal)
+        # Primary reward signals (terminal):
+        # - Base solvability (relaxed): +2.0
+        # - Movable-critical: +3.0 (dominant) / -2.0 (both solvable) / -3.0 (relaxed unsolvable)
+        # - Path length: alpha * (L1 + L2) - encourages non-trivial but solvable paths
+        # - Wall ratio: -5.0 * |deviation| - strong structural constraint
+        # - Corridor quality: encourages structured walls
+        
+        self.alpha = 0.06       # weight on L1+L2 (path lengths, using relaxed paths)
         self.gamma = 2.0        # adjacency (trivial) penalty
         self.delta = 0.5        # border penalty weight (terminal)
 
@@ -142,22 +148,18 @@ class GridPCGEnv(gym.Env):
         self.lambda_corridor_term = 1.5    # terminal connectedness reward
         self.lambda_corridor_step = 0.25   # tiny incremental reward for more adjacency per wall
         self.lambda_isolated_term = 0.9    # terminal penalty for isolated walls
-        self.lambda_block_term = 0.3    # terminal penalty for 2x2 wall blocks
+        self.lambda_block_term = 0.3       # terminal penalty for 2x2 wall blocks
         
-        # movable obstacle reward shaping
-        # movable obstacle reward shaping
-        self.lambda_movable = 0.5  # bonus for having movable obstacles (terminal)
+        # movable obstacle reward shaping (secondary to movable-critical condition)
+        self.lambda_movable = 0.5  # bonus for having movable obstacles in target range (terminal)
         # Scale target count with grid size (approx 3% density)
         # 13x13 (169) -> ~5.0
         # 16x16 (256) -> ~7.6
         # 20x20 (400) -> ~12.0
         self.movable_desired_count = max(3.0, (self.w * self.h) * 0.03)
         
-        # New movable-specific weights
-        self.lambda_movable_on_path = 2.0  # V7: Dominant bonus for movable being on the static path
-        self.lambda_movable_off_path = 0.5 # V7: Strong penalty for movable NOT on path
-        self.lambda_boxed = 0.2            # Penalty for boxed-in movables
-        self.lambda_path_obstruction = 1.0 # V7: Strong bonus if blocked path > static path
+        # Note: Removed lambda_movable_on_path, lambda_movable_off_path, lambda_boxed, lambda_path_obstruction
+        # These are replaced by the explicit movable-critical check in _evaluate_grid()
 
         # per-step coax toward "some walls" after all 3 entities exist
         self.wall_step_coax = 0.30 # V4: Massive boost (was 0.15)
@@ -342,6 +344,19 @@ class GridPCGEnv(gym.Env):
 
     # ---------- terminal score ----------
     def _evaluate_grid(self):
+        """
+        Evaluate the final grid and compute terminal reward.
+        
+        Key logic:
+        1. RELAXED solvability: Treat MOVABLE as empty (pushable). Both paths must exist.
+        2. STRICT solvability: Treat MOVABLE as wall (solid). At least one path must be broken.
+        3. MOVABLE-CRITICAL: Relaxed solvable AND strict unsolvable = ideal puzzle.
+        
+        Reward structure prioritizes:
+        - Base solvability (relaxed) - essential
+        - Movable-critical condition - dominant signal for good puzzles
+        - Structural quality (walls, corridors) - important for aesthetics
+        """
         wall_ratio_observed = float(np.mean(self.grid == WALL))
         metrics = {
             "valid": 0, "L1": 0, "L2": 0,
@@ -352,7 +367,15 @@ class GridPCGEnv(gym.Env):
             "movable_ratio": 0.0,
             "solid_ratio": 0.0,
             "n_movable_on_path": 0,
-            "n_boxed": 0
+            "n_boxed": 0,
+            # New metrics for movable-critical analysis
+            "relaxed_solvable": False,
+            "strict_solvable": False,
+            "movable_critical": False,
+            "L1_relaxed": 0,
+            "L2_relaxed": 0,
+            "L1_strict": None,
+            "L2_strict": None,
         }
 
         if not self._valid_final():
@@ -362,22 +385,53 @@ class GridPCGEnv(gym.Env):
         oy, ox = self._pos(OBJECT)
         gy, gx = self._pos(GOAL)
 
-        # 1. Check STATIC solvability (ignoring movables)
-        # This ensures no WALLS block the path.
-        L1_static = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        L2_static = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        # ========================================================================
+        # CRITICAL: Explicit strict/relaxed solvability checks
+        # ========================================================================
         
-        if L1_static is None or L2_static is None:
-            # Unsolvable due to walls -> heavy penalty
-            return -1.0, metrics
-
-        # 2. Check BLOCKED solvability (respecting movables)
-        # This tells us if movables are currently blocking the path (which is okay/good if pushable)
-        L1_blocked = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
-        L2_blocked = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+        # RELAXED: Treat MOVABLE as empty (pushable) - puzzle must be solvable
+        L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+        L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        relaxed_solvable = (L1_relaxed is not None) and (L2_relaxed is not None)
         
-        # Note: L1_blocked might be None if movables block the path. That's allowed!
-        # But we use L_static for the base path reward to encourage short *potential* paths.
+        # STRICT: Treat MOVABLE as wall (solid) - puzzle should be unsolvable
+        L1_strict = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+        L2_strict = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+        strict_solvable = (L1_strict is not None) and (L2_strict is not None)
+        
+        # MOVABLE-CRITICAL condition: Relaxed solvable AND strict unsolvable
+        # This means MOVABLE obstacles are truly critical blockers
+        movable_critical = relaxed_solvable and (not strict_solvable)
+        
+        # ========================================================================
+        # Movable-Critical Reward Logic (DOMINANT signal)
+        # ========================================================================
+        
+        movable_critical_reward = 0.0
+        
+        if not relaxed_solvable:
+            # Bad level: Even with pushable movables, puzzle is unsolvable
+            # This could be due to walls blocking paths - heavy penalty
+            movable_critical_reward = -3.0
+        elif movable_critical:
+            # IDEAL: Relaxed solvable, strict unsolvable
+            # MOVABLE obstacles are critical blockers - strong bonus
+            movable_critical_reward = +3.0
+        elif strict_solvable:
+            # Both relaxed and strict are solvable
+            # MOVABLE obstacles are decorative, not functional - penalty
+            movable_critical_reward = -2.0
+        else:
+            # Relaxed solvable, strict unsolvable (but we already checked movable_critical)
+            # This shouldn't happen, but give small bonus for relaxed solvability
+            movable_critical_reward = +2.0
+        
+        # Base reward for relaxed solvability (essential requirement)
+        base_solvability_reward = +2.0 if relaxed_solvable else 0.0
+        
+        # ========================================================================
+        # Structural Rewards (walls, corridors, etc.)
+        # ========================================================================
         
         # trivial adjacency (touching)
         adj_trivial = 0.0
@@ -392,20 +446,14 @@ class GridPCGEnv(gym.Env):
         solid_ratio = ws["solid_ratio"]
         wr = ws["ratio"]
         
-        # STRICTLY target wall ratio (walls only) to force structure
-        # Use DYNAMIC curriculum target
+        # Wall ratio targeting (dynamic curriculum)
         wall_dev = abs(wr - self._cur_wall_target)
-
-        # small bonus if we land inside the [target-0.05, target+0.05] band
         band_lo = max(0.0, self._cur_wall_target - 0.05)
         band_hi = min(1.0, self._cur_wall_target + 0.05)
         band_bonus = 0.5 if (band_lo <= wr <= band_hi) else -0.5
-
-        # LINEAR penalty away from target (V4: EXTREME wall enforcement)
-        # If wall_ratio is 0.05 (dev 0.2), penalty is -1.0.
         wall_term = band_bonus - 5.0 * wall_dev
 
-        # corridor quality
+        # Corridor quality (encourages structured walls, not blobs)
         if ws["n_solid"] > 0:
             adj_per_wall = ws["n_adj_pairs"] / float(ws["n_solid"])
             iso_frac = ws["n_isolated"] / float(ws["n_solid"])
@@ -418,104 +466,87 @@ class GridPCGEnv(gym.Env):
                 - self.lambda_block_term * (ws["n_2x2"] / max(1, ws["n_solid"]))
         )
 
-        # --- Movable Logic ---
+        # ========================================================================
+        # Movable Quantity Reward (secondary to movable-critical)
+        # ========================================================================
         
-        # A. Quantity Reward (Bell curve around target)
-        # Use DYNAMIC curriculum target
         movable_count_term = 0.0
         
-        # If target is 0 (early phase), penalize ANY movables
+        # Early curriculum: penalize movables if target is 0
         if self._cur_movable_target < 0.1:
             if n_movable > 0:
                 movable_count_term = -0.1 * n_movable
         elif n_movable > 0:
-            # Target range: target +/- 2 (tighter range for V7)
+            # Target range: target +/- 2
             t_min = max(1, self._cur_movable_target - 2)
             t_max = self._cur_movable_target + 2
             
             if t_min <= n_movable <= t_max:
-                movable_count_term = self.lambda_movable # Max bonus in range
+                movable_count_term = self.lambda_movable * 0.5  # Reduced weight (secondary to critical)
             else:
-                # Linear penalty outside range
                 diff = min(abs(n_movable - t_min), abs(n_movable - t_max))
-                movable_count_term = -0.2 * diff # Stricter penalty
+                movable_count_term = -0.2 * diff
         
-        # B. On-Path Reward
-        # Identify cells on the STATIC shortest path
-        path_cells = get_shortest_path_cells(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        path_cells |= get_shortest_path_cells(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        # ========================================================================
+        # Path Length Reward (use relaxed paths - encourages solvability)
+        # ========================================================================
         
-        n_on_path = 0
-        n_off_path = 0
-        n_boxed = 0
+        if relaxed_solvable:
+            path_len_reward = self.alpha * (L1_relaxed + L2_relaxed)
+        else:
+            path_len_reward = 0.0  # No reward if unsolvable
         
-        # Iterate movables to check path intersection and boxed status
-        ys, xs = np.where(self.grid == MOVABLE)
-        for my, mx in zip(ys, xs):
-            if (my, mx) in path_cells:
-                n_on_path += 1
-            else:
-                n_off_path += 1
-            
-            # Check if boxed (3+ neighbors are solid)
-            deg = 0
-            for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
-                ny, nx = my+dy, mx+dx
-                if 0 <= ny < self.h and 0 <= nx < self.w:
-                    if self.grid[ny, nx] == WALL or self.grid[ny, nx] == MOVABLE:
-                        deg += 1
-                else:
-                    deg += 1 # border is solid
-            if deg >= 3:
-                n_boxed += 1
-
-        movable_quality_term = (
-            + self.lambda_movable_on_path * n_on_path
-            - self.lambda_movable_off_path * n_off_path
-            - self.lambda_boxed * n_boxed
-        )
+        # ========================================================================
+        # Additional Penalties
+        # ========================================================================
         
-        # C. Obstruction Bonus
-        # If L_blocked > L_static (or None), it means movables are effectively increasing the path length
-        # which implies they are "in the way" (good for a puzzle).
-        obstruction_bonus = 0.0
-        path_len_static = L1_static + L2_static
-        path_len_blocked = (L1_blocked + L2_blocked) if (L1_blocked is not None and L2_blocked is not None) else float('inf')
-        
-        if path_len_blocked > path_len_static:
-            obstruction_bonus = self.lambda_path_obstruction
-
         border_pen = self._border_penalty(margin=1)
         free_comps = self._free_space_components()
         free_space_pen = 0.15 * max(0, free_comps - 1)
 
-        # Base reward uses STATIC path length (so we don't penalize the agent for blocking the path with movables)
-        R = (0.5
-             + self.alpha * path_len_static
-             + wall_term
-             + corridor_term
-             + movable_count_term
-             + movable_quality_term
-             + obstruction_bonus
-             - self.gamma * adj_trivial
-             - self.delta * border_pen
-             - free_space_pen)
+        # ========================================================================
+        # Final Reward Assembly
+        # ========================================================================
+        
+        R = (
+            base_solvability_reward          # Essential: relaxed solvability
+            + movable_critical_reward        # DOMINANT: movable-critical condition
+            + path_len_reward                # Encourage non-trivial paths
+            + wall_term                      # Structural: wall ratio
+            + corridor_term                  # Structural: corridor quality
+            + movable_count_term             # Secondary: movable quantity
+            - self.gamma * adj_trivial       # Penalty: trivial adjacency
+            - self.delta * border_pen        # Penalty: entities near borders
+            - free_space_pen                 # Penalty: disconnected free space
+        )
              
         if ws["n_solid"] == 0:
-            R -= 0.5
+            R -= 0.5  # Penalty: no structure at all
 
+        # ========================================================================
+        # Update Metrics
+        # ========================================================================
+        
         metrics.update({
             "valid": 1, 
-            "L1": int(L1_static), 
-            "L2": int(L2_static),
+            "L1": int(L1_relaxed) if L1_relaxed is not None else 0,  # Use relaxed for backward compat
+            "L2": int(L2_relaxed) if L2_relaxed is not None else 0,
             "wall_ratio": wr,
             "adj_per_wall": adj_per_wall,
             "iso_frac": iso_frac,
             "n_movable": n_movable,
             "movable_ratio": ws["movable_ratio"],
             "solid_ratio": solid_ratio,
-            "n_movable_on_path": n_on_path,
-            "n_boxed": n_boxed,
+            "n_movable_on_path": 0,  # Deprecated but kept for backward compat
+            "n_boxed": 0,  # Deprecated but kept for backward compat
+            # New metrics
+            "relaxed_solvable": relaxed_solvable,
+            "strict_solvable": strict_solvable,
+            "movable_critical": movable_critical,
+            "L1_relaxed": int(L1_relaxed) if L1_relaxed is not None else 0,
+            "L2_relaxed": int(L2_relaxed) if L2_relaxed is not None else 0,
+            "L1_strict": int(L1_strict) if L1_strict is not None else None,
+            "L2_strict": int(L2_strict) if L2_strict is not None else None,
             "final_grid": self.grid.copy()
         })
         return float(R), metrics
@@ -622,28 +653,25 @@ class GridPCGEnv(gym.Env):
                 reward += 0.05 # V4: Explicit bonus for placing a wall
         elif t == MOVABLE:
             # Movable obstacles: cannot overwrite entities, can replace walls or empty cells
+            # Per-step shaping: small bonuses for placing movables (terminal reward handles criticality)
             if self.grid[y, x] in (ROBOT, OBJECT, GOAL):
                 reward -= 0.03
             elif self.grid[y, x] == MOVABLE:
-                reward -= 0.01  # redundant
+                reward -= 0.01  # redundant placement
             elif self.grid[y, x] == WALL:
                 # Converting wall to movable
                 self.grid[y, x] = MOVABLE
                 reward += 0.01
-                # Bonus if this new movable is on the static path
+                # Small bonus if on static path (shaping signal - terminal reward is dominant)
                 if (y, x) in path_cells_static:
-                    reward += 0.15 # V7: Increased bonus
-                else:
-                    reward -= 0.05 # V7: Increased penalty
+                    reward += 0.10
             else:  # EMPTY
                 # Place movable on empty cell
                 self.grid[y, x] = MOVABLE
                 reward += 0.02
-                # Strong bonus if placed on the static path
+                # Small bonus if on static path (shaping signal)
                 if (y, x) in path_cells_static:
-                    reward += 0.20 # V7: Increased bonus
-                else:
-                    reward -= 0.05 # V7: Increased penalty
+                    reward += 0.10
                 
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
@@ -652,9 +680,9 @@ class GridPCGEnv(gym.Env):
                 # Removing a movable
                 self.grid[y, x] = EMPTY
                 reward -= 0.02
-                # Penalty if removing from path (we want them there!)
+                # Small penalty if removing from path (shaping signal)
                 if (y, x) in path_cells_static:
-                    reward -= 0.05
+                    reward -= 0.03
             else:
                 self.grid[y, x] = EMPTY
 
