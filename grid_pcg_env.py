@@ -416,11 +416,13 @@ class GridPCGEnv(gym.Env):
         elif movable_critical:
             # IDEAL: Relaxed solvable, strict unsolvable
             # MOVABLE obstacles are critical blockers - strong bonus
-            movable_critical_reward = +3.0
+            # Increased from +3.0 to +5.0 to make it more dominant
+            movable_critical_reward = +5.0
         elif strict_solvable:
             # Both relaxed and strict are solvable
-            # MOVABLE obstacles are decorative, not functional - penalty
-            movable_critical_reward = -2.0
+            # MOVABLE obstacles are decorative, not functional - STRONG penalty
+            # Increased from -2.0 to -4.0 to discourage non-critical movables
+            movable_critical_reward = -4.0
         else:
             # Relaxed solvable, strict unsolvable (but we already checked movable_critical)
             # This shouldn't happen, but give small bonus for relaxed solvability
