@@ -215,7 +215,7 @@ class Phase2Env(gym.Env):
         elif n_movable > target_max:
             # Strong penalty for excess movables (scales with how many extra)
             excess = n_movable - target_max
-            R -= 0.5 * excess  # Linear penalty: 10 movables = -2.0, 20 = -7.0
+            R -= 1.0 * excess  # Linear penalty: 10 movables = -4.0, 19 = -13.0
         elif n_movable < target_min and n_movable > 0:
             R -= 1.0  # Penalty for too few (but not as harsh)
         
