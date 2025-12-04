@@ -41,7 +41,7 @@ class Phase1Env(gym.Env):
         seed: int | None = None,
         wall_target: float = 0.25,
         entity_min_distance: int = 5,  # Minimum distance between entities
-        entity_border_margin: int = 2,  # Entities must be at least this far from borders
+        entity_border_margin: int = 0,  # Entities can be placed at edges (0 = no margin)
     ):
         super().__init__()
         self.h = int(size)
@@ -106,20 +106,21 @@ class Phase1Env(gym.Env):
         """
         Randomly place ROBOT, OBJECT, GOAL with constraints:
         - Minimum distance between any two entities
-        - Border margin
+        - Can be placed at edges (no border margin restriction)
         """
         self.entity_positions.clear()
         entities = [ROBOT, OBJECT, GOAL]
         self.rng.shuffle(entities)
         
         placed = []
-        margin = self.entity_border_margin
+        margin = self.entity_border_margin  # Now 0, so entities can be anywhere
         
         for entity in entities:
             attempts = 0
             while attempts < 1000:  # Safety limit
-                y = self.rng.randint(margin, self.h - margin)
-                x = self.rng.randint(margin, self.w - margin)
+                # Allow placement anywhere in grid (margin=0 means full range)
+                y = self.rng.randint(0, self.h)
+                x = self.rng.randint(0, self.w)
                 
                 # Check minimum distance from already placed entities
                 too_close = False
@@ -138,8 +139,8 @@ class Phase1Env(gym.Env):
             
             if attempts >= 1000:
                 # Fallback: place anywhere if we can't find a good spot
-                y = self.rng.randint(margin, self.h - margin)
-                x = self.rng.randint(margin, self.w - margin)
+                y = self.rng.randint(0, self.h)
+                x = self.rng.randint(0, self.w)
                 self.grid[y, x] = entity
                 self.entity_positions.add((y, x))
                 placed.append((y, x))

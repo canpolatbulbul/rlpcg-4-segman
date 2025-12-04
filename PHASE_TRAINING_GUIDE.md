@@ -38,6 +38,18 @@ python eval_phase1.py \
   --episodes 256
 ```
 
+### Montage
+```bash
+python montage_phase1.py \
+  --model runs/phase1_structure/phase1_final.zip \
+  --n 16 \
+  --size 13 \
+  --max_steps 150 \
+  --wall_target 0.25 \
+  --out montage_phase1.png \
+  --deterministic
+```
+
 ### Success Criteria
 - >90% valid levels (all entities present)
 - >85% solvable (relaxed solvability)
@@ -68,6 +80,17 @@ python eval_phase2.py \
   --model runs/phase2_challenge/phase2_final.zip \
   --phase1_model runs/phase1_structure/phase1_final.zip \
   --episodes 256
+```
+### Montage
+```bash
+python montage_phase2.py \
+  --model runs/phase2_challenge/phase2_final.zip \
+  --phase1_model runs/phase1_structure/phase1_final.zip \
+  --n 16 \
+  --size 13 \
+  --max_steps 80 \
+  --out montage_phase2.png \
+  --deterministic
 ```
 
 ### Success Criteria
