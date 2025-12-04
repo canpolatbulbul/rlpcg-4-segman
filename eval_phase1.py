@@ -37,7 +37,7 @@ def main():
     env = Phase1Env(size=args.size, max_steps=args.max_steps, wall_target=args.wall_target)
     model = PPO.load(args.model, env=env, device="auto")
     
-    keys = ["wall_ratio", "adj_per_wall", "iso_frac", "L1", "L2", "valid"]
+    keys = ["wall_ratio", "adj_per_wall", "iso_frac", "L1", "L2", "valid", "early_terminated", "episode_length"]
     acc = {k: [] for k in ["reward"] + keys}
     
     for _ in range(args.episodes):
@@ -62,6 +62,18 @@ def main():
     for k in ["wall_ratio", "adj_per_wall", "iso_frac", "L1", "L2"]:
         if len(acc.get(k, [])):
             print(f"avg_{k:15s} = {np.mean(acc[k]):.3f}  (min {np.min(acc[k]):.3f}, max {np.max(acc[k]):.3f})")
+    
+    # Debug metrics
+    if len(acc.get("early_terminated", [])) > 0:
+        early_term_count = sum(int(x) for x in acc["early_terminated"])
+        early_term_pct = 100.0 * early_term_count / len(acc["early_terminated"])
+        print(f"\n=== Debug Metrics ===")
+        print(f"Early terminated: {early_term_count}/{len(acc['early_terminated'])} ({early_term_pct:.1f}%)")
+    
+    if len(acc.get("episode_length", [])) > 0:
+        ep_lengths = [x for x in acc["episode_length"] if x > 0]
+        if len(ep_lengths) > 0:
+            print(f"avg_episode_length = {np.mean(ep_lengths):.1f}  (min {np.min(ep_lengths):.0f}, max {np.max(ep_lengths):.0f})")
 
 
 if __name__ == "__main__":
