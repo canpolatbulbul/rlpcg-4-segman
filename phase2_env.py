@@ -208,9 +208,16 @@ class Phase2Env(gym.Env):
             # Both solvable: movables are not critical
             R = self.movable_critical_penalty
         
-        # Small bonuses
-        if 3 <= n_movable <= 7:
-            R += self.movable_count_bonus
+        # Movable count constraint (target: 3-6 movables)
+        target_min, target_max = 3, 6
+        if target_min <= n_movable <= target_max:
+            R += 1.0  # Bonus for being in ideal range
+        elif n_movable > target_max:
+            # Strong penalty for excess movables (scales with how many extra)
+            excess = n_movable - target_max
+            R -= 0.5 * excess  # Linear penalty: 10 movables = -2.0, 20 = -7.0
+        elif n_movable < target_min and n_movable > 0:
+            R -= 1.0  # Penalty for too few (but not as harsh)
         
         R += self.structure_preservation_bonus  # Small bonus for maintaining structure
         
