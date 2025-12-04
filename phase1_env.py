@@ -218,10 +218,13 @@ class Phase1Env(gym.Env):
         if L1 is None or L2 is None:
             return False
         
-        # Check wall ratio
+        # Check wall ratio (use dynamic target with tolerance)
         ws = self._wall_stats()
         wr = ws["ratio"]
-        if not (0.20 <= wr <= 0.30):
+        # Allow termination if within ±0.05 of target
+        target_lo = max(0.0, self.wall_target - 0.05)
+        target_hi = min(1.0, self.wall_target + 0.05)
+        if not (target_lo <= wr <= target_hi):
             return False
         
         # Check path length (non-trivial)
@@ -371,12 +374,19 @@ class Phase1Env(gym.Env):
         # Check termination
         terminated = False
         truncated = False
+        early_terminated = False
         
         if self.steps >= self.max_steps:
             terminated = True
         elif self._can_early_terminate():
             terminated = True
-            reward += self.early_term_bonus  # Early termination bonus
+            early_terminated = True
+            # Scale early termination bonus based on how close to target
+            ws = self._wall_stats()
+            wall_dev = abs(ws["ratio"] - self.wall_target)
+            # Bonus scales from full (0.2) at target to 0 at ±0.05 deviation
+            early_bonus_scaled = self.early_term_bonus * max(0.0, 1.0 - wall_dev / 0.05)
+            reward += early_bonus_scaled
         
         info = {}
         if terminated:
