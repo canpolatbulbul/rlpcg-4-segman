@@ -39,7 +39,7 @@ class Phase1Env(gym.Env):
         max_steps: int = 200,  # Increased from 150 to give more time for wall placement
         min_steps: int = 50,  # Minimum steps before early termination allowed
         seed: int | None = None,
-        wall_target: float = 0.25,
+        wall_target: float = 0.35,
         entity_min_distance: int = 5,  # Minimum distance between entities
         entity_border_margin: int = 0,  # Entities can be placed at edges (0 = no margin)
     ):

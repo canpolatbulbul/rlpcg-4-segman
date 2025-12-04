@@ -56,7 +56,7 @@ class Phase2Env(gym.Env):
         from phase1_env import Phase1Env
         
         # Create a temporary Phase 1 env for the model
-        temp_phase1_env = Phase1Env(size=size, max_steps=150, seed=seed)
+        temp_phase1_env = Phase1Env(size=size, max_steps=200, seed=seed)
         self.phase1_model = PPO.load(phase1_model_path, env=temp_phase1_env, device="auto")
         self.phase1_env = temp_phase1_env
         
