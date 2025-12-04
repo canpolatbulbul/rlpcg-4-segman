@@ -63,7 +63,7 @@ class Phase1Env(gym.Env):
         self.lambda_corridor_term = 1.5    # Corridor quality
         self.lambda_isolated_term = 0.9    # Isolated walls penalty
         self.lambda_block_term = 0.3       # 2x2 block penalty
-        self.wall_ratio_penalty = 10.0     # Wall ratio deviation penalty (increased from 5.0)
+        self.wall_ratio_penalty = 20.0     # Wall ratio deviation penalty (increased from 10.0)
         
         # Early termination bonus
         self.early_term_bonus = 0.2
