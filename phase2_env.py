@@ -103,26 +103,56 @@ class Phase2Env(gym.Env):
     def _generate_base_puzzle(self) -> np.ndarray:
         """
         Use Phase 1 model to generate a base puzzle.
+        Keeps generating until we get a valid, solvable puzzle.
         Returns the grid with walls and entities placed.
         """
-        obs, _ = self.phase1_env.reset(seed=self.rng.randint(0, 2**31))
-        done = False
+        max_attempts = 10  # Safety limit to avoid infinite loop
         
-        # Run Phase 1 agent for one episode
-        for _ in range(self.phase1_env.max_steps):
-            action, _ = self.phase1_model.predict(obs, deterministic=self.phase1_deterministic)
-            obs, reward, term, trunc, info = self.phase1_env.step(int(action))
-            if term or trunc:
-                done = True
-                break
+        for attempt in range(max_attempts):
+            obs, _ = self.phase1_env.reset(seed=self.rng.randint(0, 2**31))
+            done = False
+            
+            # Run Phase 1 agent for one episode
+            for _ in range(self.phase1_env.max_steps):
+                action, _ = self.phase1_model.predict(obs, deterministic=self.phase1_deterministic)
+                obs, reward, term, trunc, info = self.phase1_env.step(int(action))
+                if term or trunc:
+                    done = True
+                    break
+            
+            # Get the final grid
+            if done and "final_grid" in info:
+                base_grid = info["final_grid"].copy()
+            else:
+                # Fallback: use current grid from phase1_env
+                base_grid = self.phase1_env.grid.copy()
+            
+            # Check if this puzzle is valid (has all entities and is solvable)
+            # Count entities
+            n_robot = int(np.sum(base_grid == ROBOT))
+            n_object = int(np.sum(base_grid == OBJECT))
+            n_goal = int(np.sum(base_grid == GOAL))
+            
+            if n_robot == 1 and n_object == 1 and n_goal == 1:
+                # Valid entities, now check solvability
+                ry, rx = np.where(base_grid == ROBOT)
+                oy, ox = np.where(base_grid == OBJECT)
+                gy, gx = np.where(base_grid == GOAL)
+                
+                if len(ry) > 0 and len(oy) > 0 and len(gy) > 0:
+                    ry, rx = int(ry[0]), int(rx[0])
+                    oy, ox = int(oy[0]), int(ox[0])
+                    gy, gx = int(gy[0]), int(gx[0])
+                    
+                    L1 = shortest_path_len(base_grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                    L2 = shortest_path_len(base_grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                    
+                    if L1 is not None and L2 is not None:
+                        # Valid and solvable - use this base puzzle!
+                        return base_grid
         
-        # Get the final grid
-        if done and "final_grid" in info:
-            base_grid = info["final_grid"].copy()
-        else:
-            # Fallback: use current grid from phase1_env
-            base_grid = self.phase1_env.grid.copy()
-        
+        # If we couldn't generate a valid puzzle after max_attempts, return the last one
+        # (This should rarely happen with a well-trained Phase 1 model)
         return base_grid
     
     def _valid_final(self) -> bool:
