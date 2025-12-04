@@ -36,7 +36,7 @@ class Phase1Env(gym.Env):
     def __init__(
         self,
         size: int = 13,
-        max_steps: int = 150,
+        max_steps: int = 200,  # Increased from 150 to give more time for wall placement
         min_steps: int = 50,  # Minimum steps before early termination allowed
         seed: int | None = None,
         wall_target: float = 0.25,
@@ -63,7 +63,7 @@ class Phase1Env(gym.Env):
         self.lambda_corridor_term = 1.5    # Corridor quality
         self.lambda_isolated_term = 0.9    # Isolated walls penalty
         self.lambda_block_term = 0.3       # 2x2 block penalty
-        self.wall_ratio_penalty = 5.0      # Wall ratio deviation penalty
+        self.wall_ratio_penalty = 10.0     # Wall ratio deviation penalty (increased from 5.0)
         
         # Early termination bonus
         self.early_term_bonus = 0.2
@@ -182,10 +182,10 @@ class Phase1Env(gym.Env):
         
         # Degree (neighbors)
         deg = np.zeros_like(g_walls, dtype=np.int32)
-        deg[1:,  :] += g_walls[:-1, :]
-        deg[:-1, :] += g_walls[1:,  :]
-        deg[:, 1:]  += g_walls[:, :-1]
-        deg[:, :-1] += g_walls[:, :-1]
+        deg[1:,  :] += g_walls[:-1, :]  # Top neighbor
+        deg[:-1, :] += g_walls[1:,  :]  # Bottom neighbor
+        deg[:, 1:]  += g_walls[:, :-1]  # Left neighbor
+        deg[:, :-1] += g_walls[:, 1:]   # Right neighbor (BUG FIX: was [:, :-1])
         n_isolated = int(((g_walls == 1) & (deg == 0)).sum())
         
         # 2x2 blocks
@@ -398,6 +398,8 @@ class Phase1Env(gym.Env):
                 r_eval, metrics = self._evaluate_grid()
                 reward += r_eval
                 metrics["final_grid"] = self.grid.copy()
+                metrics["early_terminated"] = early_terminated  # Track if episode ended early
+                metrics["episode_length"] = self.steps  # Track episode length
                 info = metrics
         
         return self._obs(), float(reward), terminated, truncated, info
