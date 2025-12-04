@@ -215,7 +215,7 @@ class Phase2Env(gym.Env):
         elif n_movable > target_max:
             # Strong penalty for excess movables (scales with how many extra)
             excess = n_movable - target_max
-            R -= 1.0 * excess  # Linear penalty: 10 movables = -4.0, 19 = -13.0
+            R -= 1.5 * excess  # Increased from 1.0: 10 movables = -6.0, 13 = -10.5
         elif n_movable < target_min and n_movable > 0:
             R -= 1.0  # Penalty for too few (but not as harsh)
         
@@ -274,8 +274,39 @@ class Phase2Env(gym.Env):
             if self.grid[y, x] == MOVABLE:
                 reward -= 0.01  # Redundant placement
             else:
+                # STRATEGIC PLACEMENT SHAPING: Reward movables that obstruct paths
+                ry, rx = self._pos(ROBOT)
+                oy, ox = self._pos(OBJECT)
+                gy, gx = self._pos(GOAL)
+                
+                # Check strict paths BEFORE placing movable
+                L1_before = None
+                L2_before = None
+                if ry and oy and gy:
+                    L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+                    L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+                
+                # Place the movable
                 self.grid[y, x] = MOVABLE
-                reward += 0.02  # Small bonus for placing movable
+                reward += 0.02  # Small base bonus for placing movable
+                
+                # Check strict paths AFTER placing movable
+                if ry and oy and gy:
+                    L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+                    L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+                    
+                    # Reward if we made paths longer or blocked them (obstructing paths is good!)
+                    if L1_before is not None and (L1_after is None or L1_after > L1_before):
+                        reward += 0.3  # Good: blocked or lengthened R→O path
+                    if L2_before is not None and (L2_after is None or L2_after > L2_before):
+                        reward += 0.3  # Good: blocked or lengthened O→G path
+                    
+                    # Safety check: verify relaxed solvability is maintained
+                    L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                    L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                    if L1_relaxed is None or L2_relaxed is None:
+                        reward -= 1.0  # Strong penalty for breaking relaxed solvability
+                        
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
                 reward -= 0.01  # Redundant
