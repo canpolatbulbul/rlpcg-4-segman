@@ -14,13 +14,14 @@ from phase1_env import Phase1Env
 from small_cnn import SmallGridCNN
 
 
-def make_env(seed: int, size: int, max_steps: int, wall_target: float):
+def make_env(seed: int, size: int, max_steps: int, wall_target: float, n_objects: int = 1):
     def _thunk():
         return Phase1Env(
             size=size,
             max_steps=max_steps,
             seed=seed,
-            wall_target=wall_target
+            wall_target=wall_target,
+            n_objects=n_objects
         )
     return _thunk
 
@@ -77,6 +78,7 @@ def main():
     p.add_argument("--n_envs", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--wall_target", type=float, default=0.35)
+    p.add_argument("--n_objects", type=int, default=1, help="Number of objects (and goals). 1 = single-object, >1 = multi-object (MO-SeGMaN)")
     
     # Training
     p.add_argument("--total_timesteps", type=int, default=1_000_000)
@@ -100,12 +102,12 @@ def main():
     print("Using cuda device" if torch.cuda.is_available() else "Using cpu device")
     
     # Vectorized environments
-    venv_fns = [make_env(args.seed + i, args.size, args.max_steps, args.wall_target)
+    venv_fns = [make_env(args.seed + i, args.size, args.max_steps, args.wall_target, args.n_objects)
                 for i in range(args.n_envs)]
     train_env = SubprocVecEnv(venv_fns) if args.n_envs > 1 else DummyVecEnv(venv_fns)
     train_env = VecMonitor(train_env, filename=os.path.join(args.logdir, "monitor.csv"))
     
-    eval_env = DummyVecEnv([make_env(10_000, args.size, args.max_steps, args.wall_target)])
+    eval_env = DummyVecEnv([make_env(10_000, args.size, args.max_steps, args.wall_target, args.n_objects)])
     eval_env = VecMonitor(eval_env)
     
     # Logger

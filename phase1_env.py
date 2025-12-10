@@ -42,6 +42,7 @@ class Phase1Env(gym.Env):
         wall_target: float = 0.35,
         entity_min_distance: int = 5,  # Minimum distance between entities
         entity_border_margin: int = 0,  # Entities can be placed at edges (0 = no margin)
+        n_objects: int = 1,  # Number of objects (and goals). 1 = single-object mode, >1 = multi-object mode
     ):
         super().__init__()
         self.h = int(size)
@@ -52,6 +53,14 @@ class Phase1Env(gym.Env):
         self.wall_target = float(wall_target)
         self.entity_min_distance = int(entity_min_distance)
         self.entity_border_margin = int(entity_border_margin)
+        self.n_objects = int(n_objects)
+        
+        # Auto-adjust size for multi-object mode
+        if self.n_objects > 1 and size < 17:
+            # Multi-object needs more space
+            self.h = 17
+            self.w = 17
+            self.size = 17
         
         self.steps = 0
         self.rng = np.random.RandomState(seed if seed is not None else 42)
@@ -92,10 +101,16 @@ class Phase1Env(gym.Env):
         return int(np.sum(self.grid == t))
     
     def _pos(self, t: int):
+        """Get position of a tile. For entities that can appear multiple times, returns first occurrence."""
         ys, xs = np.where(self.grid == t)
         if ys.size == 0:
             return None
         return int(ys[0]), int(xs[0])
+    
+    def _all_positions(self, t: int):
+        """Get all positions of a tile type. Returns list of (y, x) tuples."""
+        ys, xs = np.where(self.grid == t)
+        return [(int(y), int(x)) for y, x in zip(ys, xs)]
     
     def _manhattan_dist(self, pos1, pos2):
         y1, x1 = pos1
@@ -104,12 +119,20 @@ class Phase1Env(gym.Env):
     
     def _place_entities_randomly(self):
         """
-        Randomly place ROBOT, OBJECT, GOAL with constraints:
+        Randomly place ROBOT, N OBJECTs, N GOALs with constraints:
         - Minimum distance between any two entities
         - Can be placed at edges (no border margin restriction)
+        - For multi-object mode: places n_objects OBJECTs and n_objects GOALs
         """
         self.entity_positions.clear()
-        entities = [ROBOT, OBJECT, GOAL]
+        
+        # Build entity list: 1 robot + n_objects objects + n_objects goals
+        entities = [ROBOT]
+        for _ in range(self.n_objects):
+            entities.append(OBJECT)
+        for _ in range(self.n_objects):
+            entities.append(GOAL)
+        
         self.rng.shuffle(entities)
         
         placed = []
@@ -148,8 +171,8 @@ class Phase1Env(gym.Env):
     def _valid_final(self) -> bool:
         """Check if all entities are present."""
         return (self._count(ROBOT) == 1 and
-                self._count(OBJECT) == 1 and
-                self._count(GOAL) == 1)
+                self._count(OBJECT) == self.n_objects and
+                self._count(GOAL) == self.n_objects)
     
     def _border_penalty(self, margin: int = 1) -> float:
         """Penalty for entities near borders."""
@@ -208,15 +231,41 @@ class Phase1Env(gym.Env):
             return False
         
         # Check relaxed solvability (no movables, so just walls)
-        ry, rx = self._pos(ROBOT)
-        oy, ox = self._pos(OBJECT)
-        gy, gx = self._pos(GOAL)
-        
-        L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-        
-        if L1 is None or L2 is None:
+        robot_pos = self._pos(ROBOT)
+        if robot_pos is None:
             return False
+        ry, rx = robot_pos
+        
+        object_positions = self._all_positions(OBJECT)
+        goal_positions = self._all_positions(GOAL)
+        
+        if len(object_positions) != self.n_objects or len(goal_positions) != self.n_objects:
+            return False
+        
+        # Pair objects with goals (same logic as _evaluate_grid)
+        used_goals = set()
+        object_goal_pairs = []
+        for oy, ox in object_positions:
+            best_goal = None
+            best_dist = float('inf')
+            for gy, gx in goal_positions:
+                if (gy, gx) in used_goals:
+                    continue
+                dist = self._manhattan_dist((oy, ox), (gy, gx))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal = (gy, gx)
+            if best_goal is None:
+                return False
+            object_goal_pairs.append(((oy, ox), best_goal))
+            used_goals.add(best_goal)
+        
+        # Check all paths are solvable
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+            if L1 is None or L2 is None:
+                return False
         
         # Check wall ratio (use dynamic target with tolerance)
         ws = self._wall_stats()
@@ -227,8 +276,16 @@ class Phase1Env(gym.Env):
         if not (target_lo <= wr <= target_hi):
             return False
         
-        # Check path length (non-trivial)
-        if (L1 + L2) < 10:
+        # Check path length (non-trivial) - sum across all pairs
+        total_path_length = 0
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+            total_path_length += (L1 + L2)
+        
+        # Minimum path length scales with number of objects
+        min_path_length = 10 * self.n_objects
+        if total_path_length < min_path_length:
             return False
         
         return True
@@ -243,23 +300,75 @@ class Phase1Env(gym.Env):
         if not self._valid_final():
             return -1.0, metrics
         
-        ry, rx = self._pos(ROBOT)
-        oy, ox = self._pos(OBJECT)
-        gy, gx = self._pos(GOAL)
+        # Get robot position
+        robot_pos = self._pos(ROBOT)
+        if robot_pos is None:
+            return -1.0, metrics
+        ry, rx = robot_pos
         
-        # Check solvability (no movables, so just walls)
-        L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        # Get all object and goal positions
+        object_positions = self._all_positions(OBJECT)
+        goal_positions = self._all_positions(GOAL)
         
-        if L1 is None or L2 is None:
+        if len(object_positions) != self.n_objects or len(goal_positions) != self.n_objects:
             return -1.0, metrics
         
-        # Trivial adjacency
+        # Pair objects with goals (greedy: pair each object with closest goal)
+        # This matches MO-SeGMaN's approach where each object has a corresponding goal
+        used_goals = set()
+        object_goal_pairs = []
+        total_path_length = 0
+        
+        for oy, ox in object_positions:
+            # Find closest unused goal
+            best_goal = None
+            best_dist = float('inf')
+            for gy, gx in goal_positions:
+                if (gy, gx) in used_goals:
+                    continue
+                dist = self._manhattan_dist((oy, ox), (gy, gx))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal = (gy, gx)
+            
+            if best_goal is None:
+                return -1.0, metrics  # Should not happen if counts match
+            
+            object_goal_pairs.append(((oy, ox), best_goal))
+            used_goals.add(best_goal)
+        
+        # Check solvability for all pairs: R→O_i and O_i→G_i for each pair
+        all_paths_valid = True
+        L1_total = 0  # Sum of all R→O path lengths
+        L2_total = 0  # Sum of all O→G path lengths
+        
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            # Path from robot to object
+            L1 = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            # Path from object to goal
+            L2 = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+            
+            if L1 is None or L2 is None:
+                all_paths_valid = False
+                break
+            
+            L1_total += L1
+            L2_total += L2
+        
+        if not all_paths_valid:
+            return -1.0, metrics
+        
+        # Average path lengths for metrics (backward compatibility)
+        L1_avg = L1_total / self.n_objects
+        L2_avg = L2_total / self.n_objects
+        
+        # Trivial adjacency (check all object-goal pairs)
         adj_trivial = 0.0
-        if max(abs(ry - oy), abs(rx - ox)) <= 1:
-            adj_trivial = 1.0
-        if max(abs(oy - gy), abs(ox - gx)) <= 1:
-            adj_trivial = 1.0
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            if max(abs(ry - oy), abs(rx - ox)) <= 1:
+                adj_trivial = 1.0
+            if max(abs(oy - gy), abs(ox - gx)) <= 1:
+                adj_trivial = 1.0
         
         # Wall stats
         ws = self._wall_stats()
@@ -286,10 +395,12 @@ class Phase1Env(gym.Env):
         border_pen = self._border_penalty(margin=1)
         
         # Final reward
+        # Scale solvability bonus by number of objects (more objects = harder)
+        solvability_bonus = 3.0 * self.n_objects
         R = (
             + 2.0  # Base validity bonus
-            + 3.0  # Solvability bonus
-            + self.alpha * (L1 + L2)  # Path length
+            + solvability_bonus  # Solvability bonus (scaled by n_objects)
+            + self.alpha * (L1_total + L2_total)  # Total path length across all pairs
             + wall_term  # Wall ratio
             + corridor_term  # Corridor quality
             - self.gamma * adj_trivial  # Trivial adjacency
@@ -301,11 +412,12 @@ class Phase1Env(gym.Env):
         
         metrics.update({
             "valid": 1,
-            "L1": int(L1),
-            "L2": int(L2),
+            "L1": int(L1_avg),  # Average for backward compatibility
+            "L2": int(L2_avg),  # Average for backward compatibility
             "wall_ratio": wr,
             "adj_per_wall": adj_per_wall,
             "iso_frac": iso_frac,
+            "n_objects": self.n_objects,  # Track number of objects
             "final_grid": self.grid.copy()
         })
         
@@ -344,24 +456,50 @@ class Phase1Env(gym.Env):
                 reward -= 0.01  # Redundant placement
             else:
                 # Check solvability BEFORE placing wall
-                ry, rx = self._pos(ROBOT)
-                oy, ox = self._pos(OBJECT)
-                gy, gx = self._pos(GOAL)
+                robot_pos = self._pos(ROBOT)
+                object_positions = self._all_positions(OBJECT)
+                goal_positions = self._all_positions(GOAL)
+                
                 solvable_before = False
-                if ry and oy and gy:
-                    L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                    L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-                    solvable_before = (L1_before is not None) and (L2_before is not None)
+                if robot_pos and len(object_positions) == self.n_objects and len(goal_positions) == self.n_objects:
+                    # For efficiency, check a sample of paths (or all if n_objects is small)
+                    # Check first object-goal pair as representative
+                    if self.n_objects == 1:
+                        # Single-object mode: check the one pair
+                        oy, ox = object_positions[0]
+                        gy, gx = goal_positions[0]
+                        ry, rx = robot_pos
+                        L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                        L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                        solvable_before = (L1_before is not None) and (L2_before is not None)
+                    else:
+                        # Multi-object mode: check if at least one pair is solvable (heuristic)
+                        # Full check happens at episode end
+                        ry, rx = robot_pos
+                        oy, ox = object_positions[0]
+                        L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                        solvable_before = (L1_before is not None)  # Simplified check for per-step
                 
                 # Place the wall
                 self.grid[y, x] = WALL
                 reward += 0.08  # Base bonus for placing wall (increased from 0.05)
                 
                 # Check solvability AFTER placing wall
-                if ry and oy and gy:
-                    L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                    L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-                    solvable_after = (L1_after is not None) and (L2_after is not None)
+                if robot_pos and len(object_positions) == self.n_objects and len(goal_positions) == self.n_objects:
+                    if self.n_objects == 1:
+                        # Single-object mode: check the one pair
+                        oy, ox = object_positions[0]
+                        gy, gx = goal_positions[0]
+                        ry, rx = robot_pos
+                        L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                        L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                        solvable_after = (L1_after is not None) and (L2_after is not None)
+                    else:
+                        # Multi-object mode: simplified check
+                        ry, rx = robot_pos
+                        oy, ox = object_positions[0]
+                        L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                        solvable_after = (L1_after is not None)  # Simplified check
                     
                     # Reward maintaining solvability while placing walls
                     if solvable_before and solvable_after:

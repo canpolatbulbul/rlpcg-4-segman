@@ -14,14 +14,15 @@ from phase2_env import Phase2Env
 from small_cnn import SmallGridCNN
 
 
-def make_env(phase1_model_path: str, seed: int, size: int, max_steps: int, phase1_deterministic: bool):
+def make_env(phase1_model_path: str, seed: int, size: int, max_steps: int, phase1_deterministic: bool, n_objects: int = 1):
     def _thunk():
         return Phase2Env(
             phase1_model_path=phase1_model_path,
             size=size,
             max_steps=max_steps,
             seed=seed,
-            phase1_deterministic=phase1_deterministic
+            phase1_deterministic=phase1_deterministic,
+            n_objects=n_objects
         )
     return _thunk
 
@@ -80,6 +81,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--phase1_deterministic", action="store_true",
                    help="Use Phase 1 model deterministically for base puzzle generation")
+    p.add_argument("--n_objects", type=int, default=1, help="Number of objects (and goals). Must match Phase 1 model. 1 = single-object, >1 = multi-object (MO-SeGMaN)")
     
     # Training
     p.add_argument("--total_timesteps", type=int, default=1_000_000)
@@ -108,12 +110,12 @@ def main():
     print(f"Using Phase 1 model: {args.phase1_model}")
     
     # Vectorized environments
-    venv_fns = [make_env(args.phase1_model, args.seed + i, args.size, args.max_steps, args.phase1_deterministic)
+    venv_fns = [make_env(args.phase1_model, args.seed + i, args.size, args.max_steps, args.phase1_deterministic, args.n_objects)
                 for i in range(args.n_envs)]
     train_env = SubprocVecEnv(venv_fns) if args.n_envs > 1 else DummyVecEnv(venv_fns)
     train_env = VecMonitor(train_env, filename=os.path.join(args.logdir, "monitor.csv"))
     
-    eval_env = DummyVecEnv([make_env(args.phase1_model, 10_000, args.size, args.max_steps, args.phase1_deterministic)])
+    eval_env = DummyVecEnv([make_env(args.phase1_model, 10_000, args.size, args.max_steps, args.phase1_deterministic, args.n_objects)])
     eval_env = VecMonitor(eval_env)
     
     # Logger

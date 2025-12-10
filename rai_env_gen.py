@@ -31,7 +31,7 @@ from grid_pcg_env import EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE
 import robotic as ry
 
 # ---------- helpers ----------
-def make_phase1_env(size: int, max_steps: int, seed: int, wall_target: float):
+def make_phase1_env(size: int, max_steps: int, seed: int, wall_target: float, n_objects: int = 1):
     """
     Create Phase 1 environment factory.
     
@@ -45,11 +45,11 @@ def make_phase1_env(size: int, max_steps: int, seed: int, wall_target: float):
     even though the model's policy is already trained.
     """
     def _thunk():
-        return Phase1Env(size=size, max_steps=max_steps, seed=seed, wall_target=wall_target)
+        return Phase1Env(size=size, max_steps=max_steps, seed=seed, wall_target=wall_target, n_objects=n_objects)
     return _thunk
 
 
-def make_phase2_env(phase1_model_path: str, size: int, max_steps: int, seed: int, phase1_deterministic: bool):
+def make_phase2_env(phase1_model_path: str, size: int, max_steps: int, seed: int, phase1_deterministic: bool, n_objects: int = 1):
     """Create Phase 2 environment factory."""
     def _thunk():
         return Phase2Env(
@@ -57,7 +57,8 @@ def make_phase2_env(phase1_model_path: str, size: int, max_steps: int, seed: int
             size=size,
             max_steps=max_steps,
             seed=seed,
-            phase1_deterministic=phase1_deterministic
+            phase1_deterministic=phase1_deterministic,
+            n_objects=n_objects
         )
     return _thunk
 
@@ -184,7 +185,7 @@ def rollout_phase2(env: DummyVecEnv, model: PPO, max_steps: int, deterministic: 
     return final_grid, decode_metrics(info)
 
 
-def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int):
+def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int, n_objects: int = 1):
     """
     Convert numpy grid to rai Config files (.g format).
     
@@ -193,6 +194,7 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
         case_id: Case ID for folder naming
         sample_id: Sample ID for file naming
         size: Grid size (assumed square)
+        n_objects: Number of objects (and goals) in the grid
     
     Returns:
         (C, C_aux): Tuple of rai Config objects
@@ -208,7 +210,53 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
     C.addFile('ry_config/base.g')
     C_aux.addFile('ry_config/base-aux.g')
 
+    # Collect object and goal positions first
+    object_positions = []
+    goal_positions = []
+    robot_pos = None
+    
+    for r in range(grid.shape[0]):
+        for c in range(grid.shape[1]):
+            tile = int(grid[r, c])
+            if tile == ROBOT:
+                robot_pos = (r, c)
+            elif tile == OBJECT:
+                object_positions.append((r, c))
+            elif tile == GOAL:
+                goal_positions.append((r, c))
+    
+    # Pair objects with goals (greedy: closest pairing)
+    def manhattan_dist(pos1, pos2):
+        r1, c1 = pos1
+        r2, c2 = pos2
+        return abs(r1 - r2) + abs(c1 - c2)
+    
+    used_goals = set()
+    object_goal_pairs = []
+    for i, (or_, oc) in enumerate(object_positions):
+        best_goal_idx = None
+        best_dist = float('inf')
+        for j, (gr, gc) in enumerate(goal_positions):
+            if j in used_goals:
+                continue
+            dist = manhattan_dist((or_, oc), (gr, gc))
+            if dist < best_dist:
+                best_dist = dist
+                best_goal_idx = j
+        if best_goal_idx is not None:
+            object_goal_pairs.append((i, best_goal_idx))
+            used_goals.add(best_goal_idx)
+    
+    # Now process all tiles
     movable_count = 0  # Track movable objects for naming
+    object_indices = {}  # Map (r, c) -> object index
+    goal_indices = {}   # Map (r, c) -> goal index
+    
+    # Build index maps
+    for i, (r, c) in enumerate(object_positions):
+        object_indices[(r, c)] = i + 1  # 1-indexed
+    for i, (r, c) in enumerate(goal_positions):
+        goal_indices[(r, c)] = i + 1  # 1-indexed
 
     for r in range(grid.shape[0]):
         for c in range(grid.shape[1]):
@@ -234,25 +282,32 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
                 f_aux = C_aux.frame("ego").setRelativePosition([x_pos, y_pos, 0.0])
 
             elif tile == OBJECT:
-                # Add goal object (movable_go)
-                f = C.addFrame("obj1Joint", "world")
+                # Add goal object (movable_go) - use object index
+                obj_idx = object_indices.get((r, c), 1)
+                obj_name = f"obj{obj_idx}"
+                joint_name = f"{obj_name}Joint"
+                
+                f = C.addFrame(joint_name, "world")
                 f.setRelativePosition([x_pos, y_pos, 0.1])
-                C.addFrame(f"obj1", "obj1Joint", 
+                C.addFrame(obj_name, joint_name, 
                           f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:1, joint:rigid, logical:{{movable_go}}")
 
-                f_aux = C_aux.addFrame("obj1Joint", "world")
+                f_aux = C_aux.addFrame(joint_name, "world")
                 f_aux.setRelativePosition([x_pos, y_pos, 0.1])
-                C_aux.addFrame(f"obj1", "obj1Joint", 
+                C_aux.addFrame(obj_name, joint_name, 
                               f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:1, logical:{{movable_go}}")
-                C_aux.addFrame("obj1_cam", "obj1", f"Q:'t(0 0 7) d(180 1 0 0)' shape:camera, width:300, height:300")
+                C_aux.addFrame(f"{obj_name}_cam", obj_name, f"Q:'t(0 0 7) d(180 1 0 0)' shape:camera, width:300, height:300")
 
             elif tile == GOAL:
-                # Add goal position
-                f = C.addFrame(f"goal1", "world", 
+                # Add goal position - use goal index
+                goal_idx = goal_indices.get((r, c), 1)
+                goal_name = f"goal{goal_idx}"
+                
+                f = C.addFrame(goal_name, "world", 
                              f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1 .3], contact:0, logical:{{goal}}")
                 f.setRelativePosition([x_pos, y_pos, 0.1])
 
-                f_aux = C_aux.addFrame(f"goal1", "world", 
+                f_aux = C_aux.addFrame(goal_name, "world", 
                                      f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:0, logical:{{goal}}")
                 f_aux.setRelativePosition([x_pos, y_pos, 0.1])
 
@@ -284,6 +339,7 @@ def main():
     ap.add_argument("--phase1_max_steps", type=int, default=200, help="Max steps for Phase 1")
     ap.add_argument("--phase2_max_steps", type=int, default=80, help="Max steps for Phase 2")
     ap.add_argument("--wall_target", type=float, default=0.35, help="Target wall ratio for Phase 1")
+    ap.add_argument("--n_objects", type=int, default=1, help="Number of objects (and goals). 1 = single-object, >1 = multi-object (MO-SeGMaN)")
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--deterministic", action="store_true", help="Greedy actions (WARNING: Often produces empty grids)")
     ap.add_argument("--stochastic", action="store_true", help="Sample actions (overrides --deterministic, default)")
@@ -301,7 +357,7 @@ def main():
 
     # Create Phase 1 environment and load model
     print(f"Loading Phase 1 model from {args.phase1_model}...")
-    phase1_env = DummyVecEnv([make_phase1_env(args.size, args.phase1_max_steps, args.seed, args.wall_target)])
+    phase1_env = DummyVecEnv([make_phase1_env(args.size, args.phase1_max_steps, args.seed, args.wall_target, args.n_objects)])
     phase1_model = PPO.load(args.phase1_model, env=phase1_env, device="auto")
 
     # Create Phase 2 environment and load model
@@ -311,7 +367,8 @@ def main():
         args.size,
         args.phase2_max_steps,
         args.seed,
-        phase1_deterministic  # Use computed value (respects --stochastic override)
+        phase1_deterministic,  # Use computed value (respects --stochastic override)
+        args.n_objects
     )])
     phase2_model = PPO.load(args.phase2_model, env=phase2_env, device="auto")
 
@@ -370,7 +427,7 @@ def main():
         
         # Step 3: Convert to rai Config files
         print("  Converting to .g files...")
-        C, C_aux = grid_to_rai_config(final_grid, case_id, i, args.size)
+        C, C_aux = grid_to_rai_config(final_grid, case_id, i, args.size, args.n_objects)
         
         # Save config files
         os.makedirs(f"ry_config/case_run_id_{case_id}/pcg-{i}", exist_ok=True)

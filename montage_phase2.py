@@ -22,14 +22,15 @@ from stable_baselines3 import PPO
 from phase2_env import Phase2Env, EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE
 
 
-def make_env(phase1_model_path: str, size: int, max_steps: int, phase1_deterministic: bool, seed: int):
+def make_env(phase1_model_path: str, size: int, max_steps: int, phase1_deterministic: bool, seed: int, n_objects: int = 1):
     def _thunk():
         return Phase2Env(
             phase1_model_path=phase1_model_path,
             size=size,
             max_steps=max_steps,
             phase1_deterministic=phase1_deterministic,
-            seed=seed
+            seed=seed,
+            n_objects=n_objects
         )
     return _thunk
 
@@ -51,20 +52,80 @@ def decode_metrics(info: Any) -> Tuple[int, int, bool, bool, bool]:
     return n_movable, relaxed_solvable, strict_solvable, movable_critical, valid
 
 
-def grid_to_rgb(grid: np.ndarray) -> np.ndarray:
-    """Map grid (H, W) tile ids → RGB image in [0,1]."""
+def grid_to_rgb(grid: np.ndarray, n_objects: int = 1) -> np.ndarray:
+    """
+    Map grid (H, W) tile ids → RGB image in [0,1].
+    For multi-object mode, assigns distinct colors to different object-goal pairs.
+    """
     H, W = grid.shape
     img = np.ones((H, W, 3), dtype=np.float32)
-    colors = {
+    
+    # Base colors
+    base_colors = {
         EMPTY:  (0.94, 0.94, 0.94),  # light gray
         WALL:   (0.62, 0.43, 0.34),  # brown
         ROBOT:  (0.20, 0.45, 0.95),  # blue
-        OBJECT: (0.97, 0.75, 0.25),  # orange/yellow
-        GOAL:   (0.95, 0.35, 0.75),  # magenta
         MOVABLE: (0.40, 0.70, 0.40),  # green (movable obstacles)
     }
-    for tid, col in colors.items():
+    
+    # Apply base colors
+    for tid, col in base_colors.items():
         img[grid == tid] = col
+    
+    # Handle objects and goals with distinct colors for multi-object mode
+    if n_objects == 1:
+        # Single-object mode: use original colors
+        img[grid == OBJECT] = (0.97, 0.75, 0.25)  # orange/yellow
+        img[grid == GOAL] = (0.95, 0.35, 0.75)    # magenta
+    else:
+        # Multi-object mode: assign distinct colors to each object-goal pair
+        obj_positions = list(zip(*np.where(grid == OBJECT)))
+        goal_positions = list(zip(*np.where(grid == GOAL)))
+        
+        # Color palette for multiple objects (distinct colors)
+        object_colors = [
+            (0.97, 0.75, 0.25),  # orange/yellow (object 1)
+            (0.20, 0.80, 0.40),   # green (object 2)
+            (0.90, 0.30, 0.30),   # red (object 3)
+            (0.30, 0.50, 0.90),   # blue (object 4)
+            (0.80, 0.60, 0.20),   # brown (object 5)
+        ]
+        goal_colors = [
+            (0.95, 0.35, 0.75),   # magenta (goal 1)
+            (0.20, 0.60, 0.80),   # cyan (goal 2)
+            (0.80, 0.20, 0.50),   # pink (goal 3)
+            (0.50, 0.30, 0.90),   # purple (goal 4)
+            (0.70, 0.40, 0.60),   # rose (goal 5)
+        ]
+        
+        # Pair objects with goals (greedy: closest pairing)
+        used_goals = set()
+        for i, (oy, ox) in enumerate(obj_positions):
+            best_goal_idx = None
+            best_dist = float('inf')
+            for j, (gy, gx) in enumerate(goal_positions):
+                if j in used_goals:
+                    continue
+                dist = abs(oy - gy) + abs(ox - gx)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal_idx = j
+            
+            if best_goal_idx is not None:
+                used_goals.add(best_goal_idx)
+                color_idx = min(i, len(object_colors) - 1)
+                img[oy, ox] = object_colors[color_idx]
+                gy, gx = goal_positions[best_goal_idx]
+                img[gy, gx] = goal_colors[color_idx]
+            else:
+                img[oy, ox] = object_colors[0]
+        
+        # Color any remaining goals
+        for j, (gy, gx) in enumerate(goal_positions):
+            if j not in used_goals:
+                color_idx = min(j, len(goal_colors) - 1)
+                img[gy, gx] = goal_colors[color_idx]
+    
     return img
 
 
@@ -151,6 +212,7 @@ def main():
     ap.add_argument("--stochastic", action="store_true", help="Sample actions (overrides --deterministic)")
     ap.add_argument("--phase1_deterministic", action="store_true",
                     help="Use Phase 1 model deterministically for base puzzles")
+    ap.add_argument("--n_objects", type=int, default=1, help="Number of objects (and goals). Must match Phase 1/2 models. 1 = single-object, >1 = multi-object")
     ap.add_argument("--save_npy", type=str, default="", help="Optional path to save raw grids as .npy")
     
     args = ap.parse_args()
@@ -162,7 +224,8 @@ def main():
         args.size,
         args.max_steps,
         args.phase1_deterministic,
-        args.seed
+        args.seed,
+        args.n_objects
     )])
 
     # Load model
@@ -191,7 +254,7 @@ def main():
         ax.axis("off")
         if idx >= len(grids):
             continue
-        img = grid_to_rgb(grids[idx])
+        img = grid_to_rgb(grids[idx], n_objects=args.n_objects)
         n_mov, relaxed, strict, critical, valid = metas[idx]
         
         # Build title

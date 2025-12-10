@@ -42,6 +42,7 @@ class Phase2Env(gym.Env):
         min_steps: int = 30,  # Minimum steps before early termination
         seed: int | None = None,
         phase1_deterministic: bool = False,  # Whether to use Phase 1 model deterministically
+        n_objects: int = 1,  # Number of objects (must match Phase 1 model)
     ):
         super().__init__()
         self.h = int(size)
@@ -50,13 +51,14 @@ class Phase2Env(gym.Env):
         self.max_steps = int(max_steps)
         self.min_steps = int(min_steps)
         self.phase1_deterministic = bool(phase1_deterministic)
+        self.n_objects = int(n_objects)
         
         # Load Phase 1 model
         from stable_baselines3 import PPO
         from phase1_env import Phase1Env
         
-        # Create a temporary Phase 1 env for the model
-        temp_phase1_env = Phase1Env(size=size, max_steps=200, seed=seed)
+        # Create a temporary Phase 1 env for the model (must match Phase 1's n_objects)
+        temp_phase1_env = Phase1Env(size=size, max_steps=200, seed=seed, n_objects=n_objects)
         self.phase1_model = PPO.load(phase1_model_path, env=temp_phase1_env, device="auto")
         self.phase1_env = temp_phase1_env
         
@@ -95,10 +97,21 @@ class Phase2Env(gym.Env):
         return int(np.sum(self.grid == t))
     
     def _pos(self, t: int):
+        """Get position of a tile. For entities that can appear multiple times, returns first occurrence."""
         ys, xs = np.where(self.grid == t)
         if ys.size == 0:
             return None
         return int(ys[0]), int(xs[0])
+    
+    def _all_positions(self, t: int):
+        """Get all positions of a tile type. Returns list of (y, x) tuples."""
+        ys, xs = np.where(self.grid == t)
+        return [(int(y), int(x)) for y, x in zip(ys, xs)]
+    
+    def _manhattan_dist(self, pos1, pos2):
+        y1, x1 = pos1
+        y2, x2 = pos2
+        return abs(y1 - y2) + abs(x1 - x2)
     
     def _generate_base_puzzle(self) -> np.ndarray:
         """
@@ -158,8 +171,8 @@ class Phase2Env(gym.Env):
     def _valid_final(self) -> bool:
         """Check if all entities are present."""
         return (self._count(ROBOT) == 1 and
-                self._count(OBJECT) == 1 and
-                self._count(GOAL) == 1)
+                self._count(OBJECT) == self.n_objects and
+                self._count(GOAL) == self.n_objects)
     
     def _can_early_terminate(self) -> bool:
         """Check if early termination conditions are met (movable-critical achieved)."""
@@ -169,27 +182,59 @@ class Phase2Env(gym.Env):
         if not self._valid_final():
             return False
         
-        ry, rx = self._pos(ROBOT)
-        oy, ox = self._pos(OBJECT)
-        gy, gx = self._pos(GOAL)
+        # Get robot and all object/goal positions
+        robot_pos = self._pos(ROBOT)
+        if robot_pos is None:
+            return False
+        ry, rx = robot_pos
         
-        # Check relaxed solvability
-        L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+        object_positions = self._all_positions(OBJECT)
+        goal_positions = self._all_positions(GOAL)
         
-        if L1_relaxed is None or L2_relaxed is None:
+        if len(object_positions) != self.n_objects or len(goal_positions) != self.n_objects:
             return False
         
-        # Check strict solvability (should be unsolvable)
-        L1_strict = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
-        L2_strict = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+        # Pair objects with goals (greedy: closest pairing)
+        used_goals = set()
+        object_goal_pairs = []
+        for oy, ox in object_positions:
+            best_goal = None
+            best_dist = float('inf')
+            for gy, gx in goal_positions:
+                if (gy, gx) in used_goals:
+                    continue
+                dist = self._manhattan_dist((oy, ox), (gy, gx))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal = (gy, gx)
+            if best_goal is None:
+                return False
+            object_goal_pairs.append(((oy, ox), best_goal))
+            used_goals.add(best_goal)
         
-        strict_solvable = (L1_strict is not None) and (L2_strict is not None)
+        # Check relaxed solvability for all pairs
+        all_relaxed_solvable = True
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+            if L1_relaxed is None or L2_relaxed is None:
+                all_relaxed_solvable = False
+                break
         
-        # Movable-critical: relaxed solvable AND strict unsolvable
-        movable_critical = not strict_solvable
+        if not all_relaxed_solvable:
+            return False
         
-        return movable_critical
+        # Check strict solvability (should be unsolvable for at least one pair)
+        at_least_one_strict_unsolvable = False
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1_strict = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+            L2_strict = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+            if L1_strict is None or L2_strict is None:
+                at_least_one_strict_unsolvable = True
+                break
+        
+        # Movable-critical: all relaxed solvable AND at least one strict unsolvable
+        return at_least_one_strict_unsolvable
     
     def _evaluate_grid(self):
         """Evaluate final grid and compute terminal reward."""
@@ -208,22 +253,70 @@ class Phase2Env(gym.Env):
         if not self._valid_final():
             return -10.0, metrics
         
-        ry, rx = self._pos(ROBOT)
-        oy, ox = self._pos(OBJECT)
-        gy, gx = self._pos(GOAL)
+        # Get robot and all object/goal positions
+        robot_pos = self._pos(ROBOT)
+        if robot_pos is None:
+            return -10.0, metrics
+        ry, rx = robot_pos
         
-        # Check relaxed solvability
-        L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-        L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-        relaxed_solvable = (L1_relaxed is not None) and (L2_relaxed is not None)
+        object_positions = self._all_positions(OBJECT)
+        goal_positions = self._all_positions(GOAL)
         
-        # Check strict solvability
-        L1_strict = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
-        L2_strict = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
-        strict_solvable = (L1_strict is not None) and (L2_strict is not None)
+        if len(object_positions) != self.n_objects or len(goal_positions) != self.n_objects:
+            return -10.0, metrics
         
-        # Movable-critical condition
-        movable_critical = relaxed_solvable and (not strict_solvable)
+        # Pair objects with goals (greedy: closest pairing)
+        used_goals = set()
+        object_goal_pairs = []
+        for oy, ox in object_positions:
+            best_goal = None
+            best_dist = float('inf')
+            for gy, gx in goal_positions:
+                if (gy, gx) in used_goals:
+                    continue
+                dist = self._manhattan_dist((oy, ox), (gy, gx))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal = (gy, gx)
+            if best_goal is None:
+                return -10.0, metrics
+            object_goal_pairs.append(((oy, ox), best_goal))
+            used_goals.add(best_goal)
+        
+        # Check relaxed solvability for all pairs
+        all_relaxed_solvable = True
+        L1_relaxed_total = 0
+        L2_relaxed_total = 0
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+            L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+            if L1_relaxed is None or L2_relaxed is None:
+                all_relaxed_solvable = False
+                break
+            L1_relaxed_total += L1_relaxed
+            L2_relaxed_total += L2_relaxed
+        
+        relaxed_solvable = all_relaxed_solvable
+        
+        # Check strict solvability for all pairs
+        all_strict_solvable = True
+        at_least_one_strict_unsolvable = False
+        L1_strict_total = 0
+        L2_strict_total = 0
+        for (oy, ox), (gy, gx) in object_goal_pairs:
+            L1_strict = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+            L2_strict = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+            if L1_strict is None or L2_strict is None:
+                all_strict_solvable = False
+                at_least_one_strict_unsolvable = True
+            else:
+                L1_strict_total += L1_strict
+                L2_strict_total += L2_strict
+        
+        strict_solvable = all_strict_solvable
+        
+        # Movable-critical condition: all relaxed solvable AND at least one strict unsolvable
+        movable_critical = relaxed_solvable and at_least_one_strict_unsolvable
         
         n_movable = self._count(MOVABLE)
         
@@ -251,16 +344,23 @@ class Phase2Env(gym.Env):
         
         R += self.structure_preservation_bonus  # Small bonus for maintaining structure
         
+        # Average path lengths for metrics (backward compatibility)
+        L1_relaxed_avg = int(L1_relaxed_total / self.n_objects) if relaxed_solvable else 0
+        L2_relaxed_avg = int(L2_relaxed_total / self.n_objects) if relaxed_solvable else 0
+        L1_strict_avg = int(L1_strict_total / self.n_objects) if all_strict_solvable else None
+        L2_strict_avg = int(L2_strict_total / self.n_objects) if all_strict_solvable else None
+        
         metrics.update({
             "valid": 1,
             "relaxed_solvable": relaxed_solvable,
             "strict_solvable": strict_solvable,
             "movable_critical": movable_critical,
             "n_movable": n_movable,
-            "L1_relaxed": int(L1_relaxed) if L1_relaxed is not None else 0,
-            "L2_relaxed": int(L2_relaxed) if L2_relaxed is not None else 0,
-            "L1_strict": int(L1_strict) if L1_strict is not None else None,
-            "L2_strict": int(L2_strict) if L2_strict is not None else None,
+            "n_objects": self.n_objects,  # Track number of objects
+            "L1_relaxed": L1_relaxed_avg,
+            "L2_relaxed": L2_relaxed_avg,
+            "L1_strict": L1_strict_avg,
+            "L2_strict": L2_strict_avg,
             "final_grid": self.grid.copy()
         })
         
@@ -305,37 +405,58 @@ class Phase2Env(gym.Env):
                 reward -= 0.01  # Redundant placement
             else:
                 # STRATEGIC PLACEMENT SHAPING: Reward movables that obstruct paths
-                ry, rx = self._pos(ROBOT)
-                oy, ox = self._pos(OBJECT)
-                gy, gx = self._pos(GOAL)
+                robot_pos = self._pos(ROBOT)
+                object_positions = self._all_positions(OBJECT)
+                goal_positions = self._all_positions(GOAL)
                 
-                # Check strict paths BEFORE placing movable
-                L1_before = None
-                L2_before = None
-                if ry and oy and gy:
-                    L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
-                    L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
-                
-                # Place the movable
-                self.grid[y, x] = MOVABLE
-                reward += 0.02  # Small base bonus for placing movable
-                
-                # Check strict paths AFTER placing movable
-                if ry and oy and gy:
-                    L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
-                    L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+                # For efficiency, check first object-goal pair as representative
+                # Full check happens at episode end
+                if robot_pos and len(object_positions) > 0 and len(goal_positions) > 0:
+                    ry, rx = robot_pos
+                    oy, ox = object_positions[0]  # Check first pair
+                    # Find closest goal to first object
+                    best_goal = None
+                    best_dist = float('inf')
+                    for gy, gx in goal_positions:
+                        dist = self._manhattan_dist((oy, ox), (gy, gx))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_goal = (gy, gx)
                     
-                    # Reward if we made paths longer or blocked them (obstructing paths is good!)
-                    if L1_before is not None and (L1_after is None or L1_after > L1_before):
-                        reward += 0.3  # Good: blocked or lengthened R→O path
-                    if L2_before is not None and (L2_after is None or L2_after > L2_before):
-                        reward += 0.3  # Good: blocked or lengthened O→G path
-                    
-                    # Safety check: verify relaxed solvability is maintained
-                    L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                    L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-                    if L1_relaxed is None or L2_relaxed is None:
-                        reward -= 1.0  # Strong penalty for breaking relaxed solvability
+                    if best_goal:
+                        gy, gx = best_goal
+                        
+                        # Check strict paths BEFORE placing movable
+                        L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+                        L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+                        
+                        # Place the movable
+                        self.grid[y, x] = MOVABLE
+                        reward += 0.02  # Small base bonus for placing movable
+                        
+                        # Check strict paths AFTER placing movable
+                        L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=False)
+                        L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=False)
+                        
+                        # Reward if we made paths longer or blocked them (obstructing paths is good!)
+                        if L1_before is not None and (L1_after is None or L1_after > L1_before):
+                            reward += 0.3  # Good: blocked or lengthened R→O path
+                        if L2_before is not None and (L2_after is None or L2_after > L2_before):
+                            reward += 0.3  # Good: blocked or lengthened O→G path
+                        
+                        # Safety check: verify relaxed solvability is maintained
+                        L1_relaxed = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                        L2_relaxed = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                        if L1_relaxed is None or L2_relaxed is None:
+                            reward -= 1.0  # Strong penalty for breaking relaxed solvability
+                    else:
+                        # Fallback: just place the movable
+                        self.grid[y, x] = MOVABLE
+                        reward += 0.02
+                else:
+                    # Fallback: just place the movable
+                    self.grid[y, x] = MOVABLE
+                    reward += 0.02
                         
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:

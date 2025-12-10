@@ -20,9 +20,9 @@ from stable_baselines3 import PPO
 from phase1_env import Phase1Env, EMPTY, WALL, ROBOT, OBJECT, GOAL, MOVABLE
 
 
-def make_env(size: int, max_steps: int, wall_target: float, seed: int):
+def make_env(size: int, max_steps: int, wall_target: float, seed: int, n_objects: int = 1):
     def _thunk():
-        return Phase1Env(size=size, max_steps=max_steps, wall_target=wall_target, seed=seed)
+        return Phase1Env(size=size, max_steps=max_steps, wall_target=wall_target, seed=seed, n_objects=n_objects)
     return _thunk
 
 
@@ -41,20 +41,85 @@ def decode_metrics(info: Any) -> Tuple[int, int, float, int]:
     return L1, L2, w, valid
 
 
-def grid_to_rgb(grid: np.ndarray) -> np.ndarray:
-    """Map grid (H, W) tile ids → RGB image in [0,1]."""
+def grid_to_rgb(grid: np.ndarray, n_objects: int = 1) -> np.ndarray:
+    """
+    Map grid (H, W) tile ids → RGB image in [0,1].
+    For multi-object mode, assigns distinct colors to different object-goal pairs.
+    """
     H, W = grid.shape
     img = np.ones((H, W, 3), dtype=np.float32)
-    colors = {
+    
+    # Base colors
+    base_colors = {
         EMPTY:  (0.94, 0.94, 0.94),  # light gray
         WALL:   (0.62, 0.43, 0.34),  # brown
         ROBOT:  (0.20, 0.45, 0.95),  # blue
-        OBJECT: (0.97, 0.75, 0.25),  # orange/yellow
-        GOAL:   (0.95, 0.35, 0.75),  # magenta
         MOVABLE: (0.40, 0.70, 0.40),  # green (shouldn't appear in Phase 1)
     }
-    for tid, col in colors.items():
+    
+    # Apply base colors
+    for tid, col in base_colors.items():
         img[grid == tid] = col
+    
+    # Handle objects and goals with distinct colors for multi-object mode
+    if n_objects == 1:
+        # Single-object mode: use original colors
+        img[grid == OBJECT] = (0.97, 0.75, 0.25)  # orange/yellow
+        img[grid == GOAL] = (0.95, 0.35, 0.75)    # magenta
+    else:
+        # Multi-object mode: assign distinct colors to each object-goal pair
+        # Find all object and goal positions
+        obj_positions = list(zip(*np.where(grid == OBJECT)))
+        goal_positions = list(zip(*np.where(grid == GOAL)))
+        
+        # Color palette for multiple objects (distinct colors)
+        object_colors = [
+            (0.97, 0.75, 0.25),  # orange/yellow (object 1)
+            (0.20, 0.80, 0.40),   # green (object 2)
+            (0.90, 0.30, 0.30),   # red (object 3)
+            (0.30, 0.50, 0.90),   # blue (object 4)
+            (0.80, 0.60, 0.20),   # brown (object 5)
+        ]
+        goal_colors = [
+            (0.95, 0.35, 0.75),   # magenta (goal 1)
+            (0.20, 0.60, 0.80),   # cyan (goal 2)
+            (0.80, 0.20, 0.50),   # pink (goal 3)
+            (0.50, 0.30, 0.90),   # purple (goal 4)
+            (0.70, 0.40, 0.60),   # rose (goal 5)
+        ]
+        
+        # Pair objects with goals (greedy: closest pairing)
+        used_goals = set()
+        for i, (oy, ox) in enumerate(obj_positions):
+            # Find closest unused goal
+            best_goal_idx = None
+            best_dist = float('inf')
+            for j, (gy, gx) in enumerate(goal_positions):
+                if j in used_goals:
+                    continue
+                dist = abs(oy - gy) + abs(ox - gx)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_goal_idx = j
+            
+            if best_goal_idx is not None:
+                used_goals.add(best_goal_idx)
+                color_idx = min(i, len(object_colors) - 1)
+                # Color the object
+                img[oy, ox] = object_colors[color_idx]
+                # Color the corresponding goal
+                gy, gx = goal_positions[best_goal_idx]
+                img[gy, gx] = goal_colors[color_idx]
+            else:
+                # Fallback: use default colors
+                img[oy, ox] = object_colors[0]
+        
+        # Color any remaining goals
+        for j, (gy, gx) in enumerate(goal_positions):
+            if j not in used_goals:
+                color_idx = min(j, len(goal_colors) - 1)
+                img[gy, gx] = goal_colors[color_idx]
+    
     return img
 
 
@@ -135,6 +200,7 @@ def main():
     ap.add_argument("--size", type=int, default=13)
     ap.add_argument("--max_steps", type=int, default=150)
     ap.add_argument("--wall_target", type=float, default=0.25)
+    ap.add_argument("--n_objects", type=int, default=1, help="Number of objects (and goals). 1 = single-object, >1 = multi-object")
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--out", type=str, default="montage_phase1.png")
     ap.add_argument("--deterministic", action="store_true", help="Greedy actions")
@@ -145,7 +211,7 @@ def main():
     deterministic = args.deterministic and not args.stochastic
 
     # Single-env vec wrapper
-    env = DummyVecEnv([make_env(args.size, args.max_steps, args.wall_target, args.seed)])
+    env = DummyVecEnv([make_env(args.size, args.max_steps, args.wall_target, args.seed, args.n_objects)])
 
     # Load model
     model = PPO.load(args.model, env=env, device="auto")
@@ -173,7 +239,7 @@ def main():
         ax.axis("off")
         if idx >= len(grids):
             continue
-        img = grid_to_rgb(grids[idx])
+        img = grid_to_rgb(grids[idx], n_objects=args.n_objects)
         L1, L2, w, valid = metas[idx]
         title = f"L1={L1} L2={L2} w={w:.2f}"
         if valid:
