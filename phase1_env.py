@@ -63,7 +63,7 @@ class Phase1Env(gym.Env):
         self.lambda_corridor_term = 1.5    # Corridor quality
         self.lambda_isolated_term = 0.9    # Isolated walls penalty
         self.lambda_block_term = 0.3       # 2x2 block penalty
-        self.wall_ratio_penalty = 20.0     # Wall ratio deviation penalty (increased from 10.0)
+        self.wall_ratio_penalty = 30.0     # Wall ratio deviation penalty (increased to encourage higher ratios)
         
         # Early termination bonus
         self.early_term_bonus = 0.2
@@ -343,8 +343,39 @@ class Phase1Env(gym.Env):
             if self.grid[y, x] == WALL:
                 reward -= 0.01  # Redundant placement
             else:
+                # Check solvability BEFORE placing wall
+                ry, rx = self._pos(ROBOT)
+                oy, ox = self._pos(OBJECT)
+                gy, gx = self._pos(GOAL)
+                solvable_before = False
+                if ry and oy and gy:
+                    L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                    L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                    solvable_before = (L1_before is not None) and (L2_before is not None)
+                
+                # Place the wall
                 self.grid[y, x] = WALL
-                reward += 0.05  # Bonus for placing wall
+                reward += 0.08  # Base bonus for placing wall (increased from 0.05)
+                
+                # Check solvability AFTER placing wall
+                if ry and oy and gy:
+                    L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
+                    L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
+                    solvable_after = (L1_after is not None) and (L2_after is not None)
+                    
+                    # Reward maintaining solvability while placing walls
+                    if solvable_before and solvable_after:
+                        reward += 0.20  # Significant bonus for maintaining solvability (increased from 0.15)
+                        # Additional bonus if we're below target and maintaining solvability
+                        ws = self._wall_stats()
+                        wr = ws["ratio"]
+                        if wr < self.wall_target:
+                            # Progressive bonus: more reward the further below target we are
+                            target_gap = self.wall_target - wr
+                            reward += 0.15 * min(1.0, target_gap / 0.3)  # Max bonus when 0.3+ below target
+                    elif solvable_before and not solvable_after:
+                        reward -= 0.8  # Strong penalty for breaking solvability (increased from 0.5)
+                        # Don't revert - let agent learn from mistakes, but penalty is strong enough to discourage
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
                 reward -= 0.01  # Redundant

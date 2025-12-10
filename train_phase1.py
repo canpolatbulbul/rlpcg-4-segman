@@ -72,11 +72,11 @@ def main():
     
     # Environment
     p.add_argument("--size", type=int, default=13)
-    p.add_argument("--max_steps", type=int, default=150)
+    p.add_argument("--max_steps", type=int, default=200)
     p.add_argument("--min_steps", type=int, default=50)
     p.add_argument("--n_envs", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--wall_target", type=float, default=0.25)
+    p.add_argument("--wall_target", type=float, default=0.35)
     
     # Training
     p.add_argument("--total_timesteps", type=int, default=1_000_000)

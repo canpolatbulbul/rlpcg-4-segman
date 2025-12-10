@@ -282,7 +282,7 @@ def main():
     ap.add_argument("--n", type=int, default=16, help="Number of samples")
     ap.add_argument("--size", type=int, default=13)
     ap.add_argument("--phase1_max_steps", type=int, default=200, help="Max steps for Phase 1")
-    ap.add_argument("--phase2_max_steps", type=int, default=40, help="Max steps for Phase 2")
+    ap.add_argument("--phase2_max_steps", type=int, default=80, help="Max steps for Phase 2")
     ap.add_argument("--wall_target", type=float, default=0.35, help="Target wall ratio for Phase 1")
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--deterministic", action="store_true", help="Greedy actions (WARNING: Often produces empty grids)")
