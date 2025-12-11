@@ -56,16 +56,30 @@ class MetricsCallback(BaseCallback):
         # Solvability (all should be solvable if valid, since no movables)
         solvable_count = valid_count  # In Phase 1, if valid, should be solvable
         
-        # Average metrics
+        # Average metrics over ALL episodes (including failures)
         wall_ratio_avg = sum(info.get("wall_ratio", 0.0) for info in self.episode_infos) / n
         l1_avg = sum(info.get("L1", 0) for info in self.episode_infos) / max(1, n)
         l2_avg = sum(info.get("L2", 0) for info in self.episode_infos) / max(1, n)
         
+        # Average metrics over VALID episodes only (key insight: failures drag down average)
+        valid_infos = [info for info in self.episode_infos if info.get("valid", 0) == 1]
+        if valid_infos:
+            wall_ratio_valid_avg = sum(info.get("wall_ratio", 0.0) for info in valid_infos) / len(valid_infos)
+            l1_valid_avg = sum(info.get("L1", 0) for info in valid_infos) / len(valid_infos)
+            l2_valid_avg = sum(info.get("L2", 0) for info in valid_infos) / len(valid_infos)
+        else:
+            wall_ratio_valid_avg = 0.0
+            l1_valid_avg = 0
+            l2_valid_avg = 0
+        
         self.logger.record("metrics/valid_pct", 100.0 * valid_count / max(1, n))
         self.logger.record("metrics/solvable_pct", 100.0 * solvable_count / max(1, n))
-        self.logger.record("metrics/avg_wall_ratio", wall_ratio_avg)
+        self.logger.record("metrics/avg_wall_ratio", wall_ratio_avg)  # All episodes
+        self.logger.record("metrics/avg_wall_ratio_valid_only", wall_ratio_valid_avg)  # Valid episodes only
         self.logger.record("metrics/avg_l1", l1_avg)
         self.logger.record("metrics/avg_l2", l2_avg)
+        self.logger.record("metrics/avg_l1_valid_only", l1_valid_avg)
+        self.logger.record("metrics/avg_l2_valid_only", l2_valid_avg)
 
 
 def main():

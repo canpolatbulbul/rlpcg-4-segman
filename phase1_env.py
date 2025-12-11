@@ -356,9 +356,9 @@ class Phase1Env(gym.Env):
             L2_total += L2
         
         if not all_paths_valid:
-            # STRONG penalty for unsolvable grids
-            # Must outweigh per-step rewards (~0.20 * n_walls = ~20 for 100 walls)
-            return -30.0, metrics
+            # Reduced penalty to allow exploration without extreme fear
+            # Changed from -30.0 to -10.0 to balance risk/reward
+            return -10.0, metrics
         
         # Average path lengths for metrics (backward compatibility)
         L1_avg = L1_total / self.n_objects
@@ -469,8 +469,9 @@ class Phase1Env(gym.Env):
                 if wr < self.wall_target:
                     # Below target: reward placing walls
                     # Stronger bonus the further below target we are
+                    # Increased from 0.10-0.30 to 0.30-0.80 to make exploration more attractive
                     target_gap = self.wall_target - wr
-                    reward += 0.10 + 0.20 * min(1.0, target_gap / 0.2)  # 0.10 to 0.30 per wall
+                    reward += 0.30 + 0.50 * min(1.0, target_gap / 0.2)  # 0.30 to 0.80 per wall
                 elif wr > self.wall_target + 0.05:
                     # Above target: penalize placing walls
                     reward -= 0.15
@@ -524,7 +525,7 @@ class Phase1Env(gym.Env):
         if terminated:
             if not self._valid_final():
                 wr = float(np.mean(self.grid == WALL))
-                reward += -30.0  # Strong penalty for invalid grid (matches unsolvable penalty)
+                reward += -10.0  # Reduced penalty for invalid grid (matches unsolvable penalty)
                 info = {"valid": 0, "L1": 0, "L2": 0, "wall_ratio": wr, "final_grid": self.grid.copy()}
             else:
                 r_eval, metrics = self._evaluate_grid()
