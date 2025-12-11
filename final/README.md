@@ -5,16 +5,19 @@ This directory contains the trained models and scripts needed to generate proced
 ## Contents
 
 ### Models
+
 - `phase1_model.zip` - Phase 1 trained model (generates base puzzles with walls + entities)
 - `phase2_model.zip` - Phase 2 trained model (adds movable obstacles to create challenging puzzles)
 
 ### Scripts
+
 - `montage_phase1.py` - Visualize Phase 1 model outputs (grid montages)
 - `montage_phase2_critical_only.py` - Visualize Phase 2 model outputs (only movable-critical puzzles)
 - `rai_env_gen.py` - Generate environments and convert to rai Config (.g) files
 - `segman_test.py` - Test generated environments with MOSeGMan planner
 
 ### Dependencies
+
 - `phase1_env.py` - Phase 1 environment definition
 - `phase2_env.py` - Phase 2 environment definition
 - `grid_pcg_env.py` - Shared utilities (pathfinding, etc.)
@@ -23,7 +26,9 @@ This directory contains the trained models and scripts needed to generate proced
 - `ry_config/` - Base rai configuration files (base.g, base-aux.g)
 
 ## Quick Start
+
 Models were trained with size 17, n_objects 2, wall_target 0.40, so these scripts are intended to be used with those args, otherwise unexpected outcomes may occur.
+
 ### 1. Generate Environments (rai Config files)
 
 ```bash
@@ -34,10 +39,12 @@ python rai_env_gen.py \
   --size 17 \
   --n_objects 2 \
   --wall_target 0.40 \
-  --stochastic
+  --stochastic \
+  --critical_only
 ```
 
 **Arguments:**
+
 - `--phase1_model`: Path to Phase 1 model (required)
 - `--phase2_model`: Path to Phase 2 model (required)
 - `--n`: Number of environments to generate (default: 16)
@@ -48,6 +55,7 @@ python rai_env_gen.py \
 - `--deterministic`: Use greedy actions (often produces empty grids, not recommended)
 
 **Output:**
+
 - Creates `ry_config/case_run_id_XXXX/` directory
 - Each environment saved as `pcg-N/pcg-N.g` and `pcg-N-aux.g`
 
@@ -65,6 +73,7 @@ python montage_phase1.py \
 ```
 
 **Optional but Strongly Recommended:**
+
 - `--valid_only`: Only show valid (solvable) grids
 
 ### 3. Visualize Phase 2 Outputs (Critical Only)
@@ -85,18 +94,24 @@ python montage_phase2_critical_only.py \
 ### 4. Test Generated Environments with MOSeGMan
 
 ```bash
-python segman_test.py --case_id <case_id>
+python segman_test.py --case_id <case_id> --replay --verbose 1 --view
 ```
 
 **Arguments:**
-- `--case_id`: Case ID from rai_env_gen output (the number in `case_run_id_XXXX`)
 
-**Output:**
+- `--case_id`: Case ID from rai_env_gen output (the number in `case_run_id_XXXX`)
+- `--replay`: Shows a replay of the solution after successfull Solution
+- `--view`: Shows the config's view before starting.
+- `--verbose`: Shows extra debug info while the solver is working.
+
+  **Output:**
+
 - Creates `data/tracks_id_<case_id>.csv` with robot trajectories
 
 ## Model Specifications
 
 ### Phase 1 Model
+
 - **Grid size**: 17×17 (for 2-object mode)
 - **Wall target**: 0.40
 - **Objects**: 2 objects, 2 goals
@@ -104,6 +119,7 @@ python segman_test.py --case_id <case_id>
 - **Output**: Base puzzle with walls and entities (no movables)
 
 ### Phase 2 Model
+
 - **Grid size**: 17×17 (matches Phase 1)
 - **Objects**: 2 objects, 2 goals (matches Phase 1)
 - **Action space**: Place MOVABLE or EMPTY
@@ -113,6 +129,7 @@ python segman_test.py --case_id <case_id>
 ## Environment Format
 
 ### Grid Tiles
+
 - `EMPTY` (0): Empty space (light gray)
 - `WALL` (1): Wall (brown)
 - `ROBOT` (2): Robot start position (blue)
@@ -121,7 +138,9 @@ python segman_test.py --case_id <case_id>
 - `MOVABLE` (5): Movable obstacle (green)
 
 ### Movable-Critical Condition
+
 A puzzle is "movable-critical" if:
+
 - **Relaxed solvable**: All paths (R→O1, O1→G1, R→O2, O2→G2) are solvable when movables are treated as pushable
 - **Strict unsolvable**: At least one path is unsolvable when movables are treated as walls (blocking)
 
@@ -161,6 +180,7 @@ lab_directory/
 - `gurobipy`
 
 Install dependencies:
+
 ```bash
 pip install stable-baselines3 numpy matplotlib gymnasium
 # Plus robotic library (rai) - follow your lab's installation instructions (for SeGMaN , 0.2.2 was used)
@@ -169,17 +189,21 @@ pip install stable-baselines3 numpy matplotlib gymnasium
 ## Troubleshooting
 
 ### Empty or Invalid Grids
+
 - **Solution**: Use `--stochastic` flag (default). Deterministic mode often produces empty grids.
 
 ### Low Critical Rate in Phase 2
+
 - **Normal**: Movable-critical puzzles are harder to generate. The script will retry automatically.
 - **Solution**: Increase `--max_attempts` in montage script, or generate more samples.
 
 ### Size Mismatch Errors
+
 - **Ensure**: `--size` and `--n_objects` match the training configuration
 - **For 2-object mode**: Use `--size 17 --n_objects 2`
 
 ### Model Loading Errors
+
 - **Check**: Model paths are correct and files exist
 - **Ensure**: Models were trained with matching `n_objects` configuration
 
