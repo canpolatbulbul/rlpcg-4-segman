@@ -18,7 +18,9 @@ fikir.txt
 
 *.md 
 !README.md
-
+z.log.global
+final/ry_config/case_run_id_*
+final/data/*
 # Large raw artifacts (safety net)
 # --- PUT GENERAL IGNORES FIRST ---
 *.zip

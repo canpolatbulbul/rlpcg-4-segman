@@ -157,11 +157,13 @@ lab_directory/
 - `numpy`, `matplotlib` (for visualization)
 - `robotic` (rai library, for rai_env_gen and segman_test)
 - `gymnasium` (for environments)
+- `scipy`
+- `gurobipy`
 
 Install dependencies:
 ```bash
 pip install stable-baselines3 numpy matplotlib gymnasium
-# Plus robotic library (rai) - follow your lab's installation instructions
+# Plus robotic library (rai) - follow your lab's installation instructions (for SeGMaN , 0.2.2 was used)
 ```
 
 ## Troubleshooting

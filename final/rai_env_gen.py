@@ -80,6 +80,24 @@ def decode_metrics(info: Any) -> Tuple[int, int, float, int]:
     return L1, L2, w, valid
 
 
+def decode_phase2_metrics(info: Any) -> dict:
+    """
+    Extract Phase 2 metrics including movable_critical from VecEnv info.
+    """
+    d = {}
+    if isinstance(info, (list, tuple)) and len(info) and isinstance(info[0], dict):
+        d = info[0]
+    elif isinstance(info, dict):
+        d = info
+    return {
+        "valid": int(d.get("valid", 0)),
+        "movable_critical": bool(d.get("movable_critical", False)),
+        "n_movable": int(d.get("n_movable", 0)),
+        "relaxed_solvable": bool(d.get("relaxed_solvable", False)),
+        "strict_solvable": bool(d.get("strict_solvable", False)),
+    }
+
+
 def unwrap_base_env(vec_env) -> Any:
     """Get the underlying (non-Vec) env for direct attribute access."""
     base = vec_env.envs[0]
@@ -177,12 +195,15 @@ def rollout_phase2(env: DummyVecEnv, model: PPO, max_steps: int, deterministic: 
 
     base = unwrap_base_env(env)
     final_grid = extract_final_grid(info)
-
+    phase2_metrics = decode_phase2_metrics(info)
+    
     if final_grid is None:
         # Fallback: get grid from env
         final_grid = base.grid.copy()
     
-    return final_grid, decode_metrics(info)
+    # Return grid and metrics tuple (for compatibility) + full metrics dict
+    L1, L2, w, valid = decode_metrics(info)
+    return final_grid, (L1, L2, w, valid, phase2_metrics)
 
 
 def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int, n_objects: int = 1):
@@ -278,8 +299,25 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
                 # Set robot position
                 f = C.frame("ego").setRelativePosition([x_pos, y_pos, 0.0])
                 f.setShape(ry.ST.ssCylinder, size=[.2, ob_s * .45, .02])
+                
+                # Update cam0 camera for MOSeGMan
+                # Main config: attached to ego (for robot's perspective)
+                try:
+                    C.delFrame("cam0")
+                except:
+                    pass
+                C.addFrame("cam0", "ego", f"Q:'t(0 0 0.5) d(180 1 0 0)' shape:camera, width:300, height:300")
 
                 f_aux = C_aux.frame("ego").setRelativePosition([x_pos, y_pos, 0.0])
+                
+                # Aux config: Use fixed top-down camera attached to world (not ego) so it always sees entire scene
+                # This ensures mask_object can always see all objects regardless of robot position
+                try:
+                    C_aux.delFrame("cam0")
+                except:
+                    pass
+                # Top-down camera at height 10, looking down, attached to world (fixed position)
+                C_aux.addFrame("cam0", "world", f"Q:'t(0 0 10) d(180 1 0 0)' shape:camera, width:300, height:300")
 
             elif tile == OBJECT:
                 # Add goal object (movable_go) - use object index
@@ -287,15 +325,28 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
                 obj_name = f"obj{obj_idx}"
                 joint_name = f"{obj_name}Joint"
                 
+                # Color palette for objects (up to 5 different colors)
+                # Colors: Blue, Green, Red, Yellow, Magenta
+                object_colors = [
+                    [0, 0, 1],      # Blue (object 1)
+                    [0, 1, 0],      # Green (object 2)
+                    [1, 0, 0],      # Red (object 3)
+                    [1, 1, 0],      # Yellow (object 4)
+                    [1, 0, 1],      # Magenta (object 5)
+                ]
+                color_idx = min(obj_idx - 1, len(object_colors) - 1)  # 0-indexed, wrap at 5
+                obj_color = object_colors[color_idx]
+                color_str = f"[{obj_color[0]} {obj_color[1]} {obj_color[2]}]"
+                
                 f = C.addFrame(joint_name, "world")
                 f.setRelativePosition([x_pos, y_pos, 0.1])
                 C.addFrame(obj_name, joint_name, 
-                          f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:1, joint:rigid, logical:{{movable_go}}")
+                          f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:{color_str}, contact:1, joint:rigid, logical:{{movable_go}}")
 
                 f_aux = C_aux.addFrame(joint_name, "world")
                 f_aux.setRelativePosition([x_pos, y_pos, 0.1])
                 C_aux.addFrame(obj_name, joint_name, 
-                              f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:1, logical:{{movable_go}}")
+                              f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:{color_str}, contact:1, logical:{{movable_go}}")
                 C_aux.addFrame(f"{obj_name}_cam", obj_name, f"Q:'t(0 0 7) d(180 1 0 0)' shape:camera, width:300, height:300")
 
             elif tile == GOAL:
@@ -303,18 +354,33 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
                 goal_idx = goal_indices.get((r, c), 1)
                 goal_name = f"goal{goal_idx}"
                 
+                # Color palette for goals (up to 5 different colors, same as objects)
+                # Colors: Blue, Green, Red, Yellow, Magenta
+                goal_colors = [
+                    [0, 0, 1],      # Blue (goal 1)
+                    [0, 1, 0],      # Green (goal 2)
+                    [1, 0, 0],      # Red (goal 3)
+                    [1, 1, 0],      # Yellow (goal 4)
+                    [1, 0, 1],      # Magenta (goal 5)
+                ]
+                color_idx = min(goal_idx - 1, len(goal_colors) - 1)  # 0-indexed, wrap at 5
+                goal_color = goal_colors[color_idx]
+                color_str = f"[{goal_color[0]} {goal_color[1]} {goal_color[2]}]"
+                color_str_transparent = f"[{goal_color[0]} {goal_color[1]} {goal_color[2]} .3]"  # Transparent for main config
+                
                 f = C.addFrame(goal_name, "world", 
-                             f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1 .3], contact:0, logical:{{goal}}")
+                             f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:{color_str_transparent}, contact:0, logical:{{goal}}")
                 f.setRelativePosition([x_pos, y_pos, 0.1])
 
                 f_aux = C_aux.addFrame(goal_name, "world", 
-                                     f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[0 0 1], contact:0, logical:{{goal}}")
+                                     f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:{color_str}, contact:0, logical:{{goal}}")
                 f_aux.setRelativePosition([x_pos, y_pos, 0.1])
 
             elif tile == MOVABLE:
                 # Add movable obstacle (movable_o)
+                # Name starts with "ob" so MOSeGMan's find_critical_objects can detect it
                 movable_count += 1
-                obj_name = f"movable_{movable_count}"
+                obj_name = f"ob_movable_{movable_count}"
                 
                 f = C.addFrame(f"{obj_name}Joint", "world")
                 f.setRelativePosition([x_pos, y_pos, 0.1])
@@ -325,6 +391,8 @@ def grid_to_rai_config(grid: np.ndarray, case_id: int, sample_id: int, size: int
                 f_aux.setRelativePosition([x_pos, y_pos, 0.1])
                 C_aux.addFrame(obj_name, f"{obj_name}Joint", 
                               f"shape:ssBox, size:[{ob_s*.6}, {ob_s*.6}, 0.2, 0.01], color:[1 1 0], contact:1, logical:{{movable_o}}")
+                # Add camera for MOSeGMan's mask_object function (needed for object weight calculation)
+                C_aux.addFrame(f"{obj_name}_cam", obj_name, f"Q:'t(0 0 7) d(180 1 0 0)' shape:camera, width:300, height:300")
 
     return C, C_aux
 
@@ -344,6 +412,8 @@ def main():
     ap.add_argument("--deterministic", action="store_true", help="Greedy actions (WARNING: Often produces empty grids)")
     ap.add_argument("--stochastic", action="store_true", help="Sample actions (overrides --deterministic, default)")
     ap.add_argument("--phase1_deterministic", action="store_true", help="Use Phase 1 model deterministically when generating base puzzles (WARNING: Often produces empty grids)")
+    ap.add_argument("--critical_only", action="store_true", help="Only generate movable-critical puzzles (requires movables to solve)")
+    ap.add_argument("--max_critical_attempts", type=int, default=1000, help="Max attempts to find critical puzzle when --critical_only is used")
     args = ap.parse_args()
 
     # Determine deterministic mode: default to stochastic (False) unless explicitly requested
@@ -403,24 +473,47 @@ def main():
             print(f"  Error: Failed to generate valid Phase 1 puzzle after {max_retries} retries, skipping sample...")
             continue
         
-        # Step 2: Add movables with Phase 2 (retry until valid)
+        # Step 2: Add movables with Phase 2 (retry until valid, and critical if requested)
         print("  Phase 2: Adding movable obstacles...")
         phase2_valid = False
+        phase2_critical = False
         final_grid = None
         phase2_meta = None
+        phase2_metrics = None
+        
+        critical_attempts = 0
+        max_critical_attempts = args.max_critical_attempts if args.critical_only else max_retries
         
         for retry in range(max_retries):
-            final_grid, phase2_meta = rollout_phase2(phase2_env, phase2_model, args.phase2_max_steps, deterministic)
+            result = rollout_phase2(phase2_env, phase2_model, args.phase2_max_steps, deterministic)
+            final_grid, phase2_meta = result[0], result[1]
             phase2_valid = phase2_meta[3]
+            phase2_metrics = phase2_meta[4] if len(phase2_meta) > 4 else decode_phase2_metrics([{}])
             
+            # Check if valid and (if critical_only, also check if critical)
             if phase2_valid:
-                break
+                if args.critical_only:
+                    phase2_critical = phase2_metrics.get("movable_critical", False)
+                    critical_attempts += 1
+                    if phase2_critical:
+                        break
+                    else:
+                        if critical_attempts < max_critical_attempts:
+                            print(f"    Retry {critical_attempts}/{max_critical_attempts}: Phase 2 puzzle not movable-critical, retrying...")
+                        else:
+                            print(f"    Warning: Reached max critical attempts ({max_critical_attempts}), using non-critical puzzle")
+                            break
+                else:
+                    break
             else:
                 print(f"    Retry {retry + 1}/{max_retries}: Phase 2 generated invalid puzzle, retrying...")
         
         if not phase2_valid:
             print(f"  Error: Failed to generate valid Phase 2 puzzle after {max_retries} retries, skipping sample...")
             continue
+        
+        if args.critical_only and not phase2_critical:
+            print(f"  Warning: Generated puzzle is not movable-critical (attempted {critical_attempts} times)")
         
         # Both phases succeeded, proceed with conversion
         valid_count += 1
@@ -441,7 +534,11 @@ def main():
         
         print(f"  Saved: pcg-{i}.g and pcg-{i}-aux.g")
         print(f"  Phase 1 metrics: wall_ratio={phase1_meta[2]:.3f}, L1={phase1_meta[0]}, L2={phase1_meta[1]}")
-        print(f"  Phase 2 metrics: valid={phase2_valid}")
+        if phase2_metrics:
+            critical_str = "✓ CRITICAL" if phase2_metrics.get("movable_critical", False) else "not critical"
+            print(f"  Phase 2 metrics: valid={phase2_valid}, {critical_str}, n_movable={phase2_metrics.get('n_movable', 0)}")
+        else:
+            print(f"  Phase 2 metrics: valid={phase2_valid}")
 
     print(f"\n=== Generation Complete ===")
     print(f"Valid samples: {valid_count}/{args.n}")
