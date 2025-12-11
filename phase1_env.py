@@ -399,10 +399,14 @@ class Phase1Env(gym.Env):
         # Scale solvability bonus by number of objects (more objects = harder)
         solvability_bonus = 3.0 * self.n_objects
         
-        # Large bonus for reaching target wall ratio (encourages agent to push toward target)
-        target_bonus = 0.0
-        if abs(wr - self.wall_target) < 0.05:
-            target_bonus = 20.0  # Large bonus for being within ±0.05 of target
+        # Gradient bonus for reaching target wall ratio (encourages agent to push toward target)
+        # Bonus scales from +20.0 at target to 0 at ±0.10 deviation
+        # This rewards progress toward target, not just hitting exact range
+        wall_dev = abs(wr - self.wall_target)
+        if wall_dev < 0.10:
+            target_bonus = 20.0 * (1.0 - wall_dev / 0.10)  # Linear scaling: 20.0 at target, 0 at ±0.10
+        else:
+            target_bonus = 0.0
         
         R = (
             + 2.0  # Base validity bonus
