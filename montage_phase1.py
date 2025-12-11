@@ -205,6 +205,8 @@ def main():
     ap.add_argument("--out", type=str, default="montage_phase1.png")
     ap.add_argument("--deterministic", action="store_true", help="Greedy actions")
     ap.add_argument("--stochastic", action="store_true", help="Sample actions (overrides --deterministic)")
+    ap.add_argument("--valid_only", action="store_true", help="Only include valid (solvable) grids in montage")
+    ap.add_argument("--max_attempts", type=int, default=None, help="Max attempts when using --valid_only (default: n * 10)")
     ap.add_argument("--save_npy", type=str, default="", help="Optional path to save raw grids as .npy")
     
     args = ap.parse_args()
@@ -218,19 +220,46 @@ def main():
 
     # Roll out n episodes
     grids, metas = [], []
-    for i in range(args.n):
-        g, meta = rollout_one(env, model, args.max_steps, deterministic=deterministic)
-        grids.append(g)
-        metas.append(meta)
+    
+    if args.valid_only:
+        # Keep sampling until we have n valid grids
+        attempts = 0
+        max_attempts = args.max_attempts or (args.n * 10)  # Default: try up to 10x the desired count
+        print(f"Sampling until we get {args.n} valid grids (max {max_attempts} attempts)...")
+        
+        while len(grids) < args.n and attempts < max_attempts:
+            g, meta = rollout_one(env, model, args.max_steps, deterministic=deterministic)
+            attempts += 1
+            L1, L2, w, valid = meta
+            if valid == 1:
+                grids.append(g)
+                metas.append(meta)
+                if len(grids) % 4 == 0:
+                    print(f"  Collected {len(grids)}/{args.n} valid grids (attempts: {attempts})")
+        
+        if len(grids) < args.n:
+            print(f"Warning: Only collected {len(grids)}/{args.n} valid grids after {attempts} attempts")
+            print(f"  Valid percentage: {100.0 * len(grids) / attempts:.1f}%")
+    else:
+        # Original behavior: sample n episodes regardless of validity
+        for i in range(args.n):
+            g, meta = rollout_one(env, model, args.max_steps, deterministic=deterministic)
+            grids.append(g)
+            metas.append(meta)
 
     # Optional: save raw grids
     if args.save_npy:
         np.save(args.save_npy, np.stack(grids, axis=0))
         print(f"Saved raw grids to {args.save_npy}")
 
-    # Build montage
-    cols = int(math.ceil(math.sqrt(args.n)))
-    rows = int(math.ceil(args.n / cols))
+    # Build montage (use actual number of grids collected, in case valid_only didn't get enough)
+    n_grids = len(grids)
+    if n_grids == 0:
+        print("Error: No grids collected! Cannot create montage.")
+        return
+    
+    cols = int(math.ceil(math.sqrt(n_grids)))
+    rows = int(math.ceil(n_grids / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 4))
     axes = np.array(axes).reshape(rows, cols)
 
@@ -242,7 +271,7 @@ def main():
         img = grid_to_rgb(grids[idx], n_objects=args.n_objects)
         L1, L2, w, valid = metas[idx]
         title = f"L1={L1} L2={L2} w={w:.2f}"
-        if valid:
+        if valid or args.valid_only:  # Always show checkmark if valid_only mode (all should be valid)
             title = "✓ " + title
         ax.set_title(title, fontsize=10)
         ax.imshow(img, interpolation="nearest")
@@ -250,7 +279,20 @@ def main():
     plt.tight_layout()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     plt.savefig(args.out, dpi=150)
-    print(f"Saved montage to {args.out}")
+    
+    # Print statistics
+    if grids:
+        valid_count = sum(1 for _, (_, _, _, v) in zip(grids, metas) if v == 1)
+        wall_ratios = [w for _, _, w, _ in metas]
+        print(f"\nSaved montage to {args.out}")
+        print(f"Statistics:")
+        print(f"  Total grids: {len(grids)}")
+        print(f"  Valid grids: {valid_count} ({100.0 * valid_count / len(grids):.1f}%)")
+        if wall_ratios:
+            print(f"  Wall ratio range: {min(wall_ratios):.3f} - {max(wall_ratios):.3f}")
+            print(f"  Wall ratio mean: {np.mean(wall_ratios):.3f}")
+    else:
+        print(f"Warning: No grids collected!")
 
 
 if __name__ == "__main__":
