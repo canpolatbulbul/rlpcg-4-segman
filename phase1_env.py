@@ -356,7 +356,9 @@ class Phase1Env(gym.Env):
             L2_total += L2
         
         if not all_paths_valid:
-            return -1.0, metrics
+            # STRONG penalty for unsolvable grids
+            # Must outweigh per-step rewards (~0.20 * n_walls = ~20 for 100 walls)
+            return -30.0, metrics
         
         # Average path lengths for metrics (backward compatibility)
         L1_avg = L1_total / self.n_objects
@@ -455,67 +457,26 @@ class Phase1Env(gym.Env):
             if self.grid[y, x] == WALL:
                 reward -= 0.01  # Redundant placement
             else:
-                # Check solvability BEFORE placing wall
-                robot_pos = self._pos(ROBOT)
-                object_positions = self._all_positions(OBJECT)
-                goal_positions = self._all_positions(GOAL)
-                
-                solvable_before = False
-                if robot_pos and len(object_positions) == self.n_objects and len(goal_positions) == self.n_objects:
-                    # For efficiency, check a sample of paths (or all if n_objects is small)
-                    # Check first object-goal pair as representative
-                    if self.n_objects == 1:
-                        # Single-object mode: check the one pair
-                        oy, ox = object_positions[0]
-                        gy, gx = goal_positions[0]
-                        ry, rx = robot_pos
-                        L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                        L2_before = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-                        solvable_before = (L1_before is not None) and (L2_before is not None)
-                    else:
-                        # Multi-object mode: check if at least one pair is solvable (heuristic)
-                        # Full check happens at episode end
-                        ry, rx = robot_pos
-                        oy, ox = object_positions[0]
-                        L1_before = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                        solvable_before = (L1_before is not None)  # Simplified check for per-step
-                
-                # Place the wall
+                # Place the wall - NO per-step solvability check
+                # Solvability is only checked at episode END via terminal reward
+                # This removes the "solvability ceiling" that was preventing higher wall ratios
                 self.grid[y, x] = WALL
-                reward += 0.15  # Base bonus for placing wall (further increased to strongly encourage walls)
                 
-                # Check solvability AFTER placing wall
-                if robot_pos and len(object_positions) == self.n_objects and len(goal_positions) == self.n_objects:
-                    if self.n_objects == 1:
-                        # Single-object mode: check the one pair
-                        oy, ox = object_positions[0]
-                        gy, gx = goal_positions[0]
-                        ry, rx = robot_pos
-                        L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                        L2_after = shortest_path_len(self.grid, (oy, ox), (gy, gx), treat_movable_as_empty=True)
-                        solvable_after = (L1_after is not None) and (L2_after is not None)
-                    else:
-                        # Multi-object mode: simplified check
-                        ry, rx = robot_pos
-                        oy, ox = object_positions[0]
-                        L1_after = shortest_path_len(self.grid, (ry, rx), (oy, ox), treat_movable_as_empty=True)
-                        solvable_after = (L1_after is not None)  # Simplified check
-                    
-                    # Reward maintaining solvability while placing walls
-                    if solvable_before and solvable_after:
-                        reward += 0.25  # Increased bonus for maintaining solvability
-                        # Additional bonus if we're below target and maintaining solvability
-                        ws = self._wall_stats()
-                        wr = ws["ratio"]
-                        if wr < self.wall_target:
-                            # Progressive bonus: more reward the further below target we are
-                            target_gap = self.wall_target - wr
-                            # Much stronger bonus: max 0.40 when 0.3+ below target (was 0.25)
-                            # This gives immediate strong signal to place more walls
-                            reward += 0.40 * min(1.0, target_gap / 0.3)  # Very strong incentive to reach target
-                    elif solvable_before and not solvable_after:
-                        reward -= 0.8  # Strong penalty for breaking solvability (increased from 0.5)
-                        # Don't revert - let agent learn from mistakes, but penalty is strong enough to discourage
+                # Simple per-step shaping based on wall ratio
+                ws = self._wall_stats()
+                wr = ws["ratio"]
+                
+                if wr < self.wall_target:
+                    # Below target: reward placing walls
+                    # Stronger bonus the further below target we are
+                    target_gap = self.wall_target - wr
+                    reward += 0.10 + 0.20 * min(1.0, target_gap / 0.2)  # 0.10 to 0.30 per wall
+                elif wr > self.wall_target + 0.05:
+                    # Above target: penalize placing walls
+                    reward -= 0.15
+                else:
+                    # At target: small bonus
+                    reward += 0.05
         else:  # EMPTY
             if self.grid[y, x] == EMPTY:
                 reward -= 0.01  # Redundant
@@ -563,7 +524,7 @@ class Phase1Env(gym.Env):
         if terminated:
             if not self._valid_final():
                 wr = float(np.mean(self.grid == WALL))
-                reward += -2.0
+                reward += -30.0  # Strong penalty for invalid grid (matches unsolvable penalty)
                 info = {"valid": 0, "L1": 0, "L2": 0, "wall_ratio": wr, "final_grid": self.grid.copy()}
             else:
                 r_eval, metrics = self._evaluate_grid()
