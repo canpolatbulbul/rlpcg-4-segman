@@ -74,8 +74,7 @@ class Phase1Env(gym.Env):
         self.lambda_block_term = 0.3       # 2x2 block penalty
         self.wall_ratio_penalty = 100.0    # Wall ratio deviation penalty (very strong to force agent toward target)
         
-        # Early termination bonus
-        self.early_term_bonus = 0.2
+        # REMOVED: Early termination bonus (early termination logic removed)
         
         # Grid
         self.grid = np.full((self.h, self.w), EMPTY, dtype=np.int32)
@@ -507,19 +506,17 @@ class Phase1Env(gym.Env):
         # Check termination
         terminated = False
         truncated = False
-        early_terminated = False
+        
+        # REMOVED: Early termination logic
+        # Rationale: Early termination created a perverse incentive where agent couldn't
+        # reliably reach the required wall ratio range [target-0.05, target+0.05], causing
+        # it to learn a "safe" strategy at lower ratios. For higher targets (0.38, 0.45),
+        # agent never reached the range, so it always ran to max_steps anyway.
+        # Removing early termination simplifies the reward structure and gives agent
+        # full max_steps to explore and learn the balance between wall ratio and solvability.
         
         if self.steps >= self.max_steps:
             terminated = True
-        elif self._can_early_terminate():
-            terminated = True
-            early_terminated = True
-            # Scale early termination bonus based on how close to target
-            ws = self._wall_stats()
-            wall_dev = abs(ws["ratio"] - self.wall_target)
-            # Bonus scales from full (0.2) at target to 0 at ±0.05 deviation
-            early_bonus_scaled = self.early_term_bonus * max(0.0, 1.0 - wall_dev / 0.05)
-            reward += early_bonus_scaled
         
         info = {}
         if terminated:
@@ -531,7 +528,6 @@ class Phase1Env(gym.Env):
                 r_eval, metrics = self._evaluate_grid()
                 reward += r_eval
                 metrics["final_grid"] = self.grid.copy()
-                metrics["early_terminated"] = early_terminated  # Track if episode ended early
                 metrics["episode_length"] = self.steps  # Track episode length
                 info = metrics
         

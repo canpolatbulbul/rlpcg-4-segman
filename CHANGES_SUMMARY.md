@@ -1,179 +1,87 @@
-# Implementation Summary: Movable-Critical Reward Logic
+# Changes Summary: Early Stopping Removal & Reward Fixes
 
-## What Was Changed
+## Analysis of Training Results
 
-### 1. Core Environment (`grid_pcg_env.py`)
+### Key Observations from TensorBoard
 
-**Major Changes:**
-- **Replaced** the old movable reward logic (on-path bonuses, obstruction checks) with **explicit movable-critical condition**
-- **Added** strict/relaxed BFS checks that explicitly verify:
-  - **Relaxed** (MOVABLE = empty): Puzzle must be solvable
-  - **Strict** (MOVABLE = wall): Puzzle should be unsolvable
-  - **Movable-critical**: Relaxed solvable AND strict unsolvable = ideal puzzle
+1. **v5 (target 0.32)**: 
+   - Valid-only wall ratio: ~0.27 (at lower bound of early termination range [0.27, 0.37])
+   - Episode length: ~215 (occasionally early-terminates)
+   - **Problem**: Agent rarely reaches the range, most episodes fail or stay below
 
-**Reward Structure (Terminal):**
-```
-Base solvability (relaxed): +2.0 (essential)
-Movable-critical bonus: +3.0 (dominant signal)
-Penalty if both solvable: -2.0 (movables irrelevant)
-Penalty if relaxed unsolvable: -3.0 (bad level)
-Path length: +0.06 × (L1_relaxed + L2_relaxed)
-Wall ratio: -5.0 × |deviation| (structural)
-Corridor quality: +1.5 × adj_per_wall - 0.9 × iso_frac (structural)
-```
+2. **v6 (target 0.45)**:
+   - Valid-only wall ratio: Starts at 0.325, **drops to 0.27**
+   - Episode length: Consistently 250 (max_steps) - **never early-terminates**
+   - **Problem**: Agent never reaches range [0.40, 0.50], so always runs to max_steps
 
-**New Metrics in `info` dict:**
-- `relaxed_solvable`: bool
-- `strict_solvable`: bool
-- `movable_critical`: bool
-- `L1_relaxed`, `L2_relaxed`: path lengths (relaxed)
-- `L1_strict`, `L2_strict`: path lengths (strict, or None)
+3. **v7 (target 0.38)**:
+   - Valid-only wall ratio: Starts at 0.325, **drops to 0.29**
+   - Episode length: Eventually 250 (max_steps)
+   - **Problem**: Similar to v6 - never consistently reaches range [0.33, 0.43]
 
-**Comments:** Added comprehensive docstrings explaining the reward design and movable-critical logic.
+### Root Cause Identified
 
----
+**Early stopping is creating a perverse incentive:**
+- Agent must reach a narrow range [target±0.05] to early-terminate
+- For higher targets (0.38, 0.45), agent **never** reaches the range
+- Agent learns: "Trying to reach higher ratios = risk of terminal penalty"
+- Agent converges to "safe" strategy at ~0.27-0.29 regardless of target
+- Early termination bonus (+0.2) is tiny compared to terminal penalty (-10.0)
 
-### 2. Training Script (`train_ppo.py`)
+**The "start high, drop later" pattern:**
+- Agent initially explores and finds some success (0.325 wall ratio)
+- But then learns that pushing higher leads to more failures
+- Agent converges to a "safe" strategy to avoid terminal penalties
 
-**Added:**
-- `MetricsCallback`: Aggregates and logs custom metrics to TensorBoard
-  - Tracks movable-critical percentage
-  - Tracks relaxed/strict solvability rates
-  - Logs average path lengths, wall ratios, etc.
-- Logs metrics every 500 episodes to TensorBoard under `metrics/` namespace
+## Changes Implemented
 
-**TensorBoard Metrics:**
-- `metrics/movable_critical_pct`: % of valid levels that are movable-critical
-- `metrics/relaxed_solvable_pct`: % of levels that are relaxed-solvable
-- `metrics/strict_solvable_pct`: % of levels that are strict-solvable
-- `metrics/valid_pct`: % of levels that are valid
-- `metrics/avg_l1_relaxed`, `metrics/avg_l2_relaxed`: Average path lengths
-- `metrics/avg_wall_ratio`, `metrics/avg_n_movable`: Structural metrics
+### 1. Removed Early Stopping Logic ✅
+**File**: `phase1_env.py`
+- Removed `_can_early_terminate()` check from `step()` function
+- Removed early termination bonus logic
+- Episodes now always run to `max_steps`
+- **Rationale**: Simplifies reward structure, removes unreachable goal, gives agent full opportunity to explore
 
----
+### 2. Increased Per-Step Rewards ✅
+**File**: `phase1_env.py` (line 473)
+- Changed from `0.10-0.30` to `0.30-0.80` per wall when below target
+- **Rationale**: Stronger incentive to explore toward target
 
-### 3. Evaluation Scripts
+### 3. Reduced Terminal Penalties ✅
+**File**: `phase1_env.py` (lines 361, 527)
+- Changed from `-30.0` to `-10.0` for unsolvable/invalid grids
+- **Rationale**: Make failures less catastrophic, allow more exploration
 
-#### `eval_model.py`
-**Enhanced to report:**
-- Solvability statistics (valid, relaxed, strict, movable-critical percentages)
-- Path length distributions (relaxed)
-- Structural metrics (wall ratio, movable count, etc.)
+### 4. Enhanced Metrics Logging ✅
+**File**: `train_phase1.py`
+- Added `metrics/avg_wall_ratio_valid_only` to track valid episodes separately
+- **Rationale**: Better visibility into agent's actual capability vs overall performance
 
-#### `eval_and_select.py`
-**Enhanced to:**
-- Track and save movable-critical flag in CSV
-- Include relaxed/strict solvability flags in CSV
-- Include path lengths (both relaxed and strict) in CSV
-- Print summary statistics at the end (if pandas is available)
-- Optionally filter keepers by movable-critical condition (commented out, can be enabled)
+## Expected Impact
 
----
+With early stopping removed:
+1. **Simpler reward structure**: Agent only needs to balance wall ratio vs solvability
+2. **Full exploration**: Agent gets full `max_steps` to explore, no artificial constraints
+3. **No unreachable goals**: Agent won't learn to "give up" because it can't reach an early termination range
+4. **Natural learning**: Agent will learn to push toward target while maintaining solvability
 
-## How to Use
-
-### Training
-
-```bash
-python train_ppo.py \
-  --size 13 --max_steps 192 --n_envs 8 \
-  --total_timesteps 1_500_000 \
-  --n_steps 1024 --batch_size 1024 \
-  --lr 3e-4 --ent_coef 0.05 --use_curriculum \
-  --logdir runs/ppo_grid_movable_critical
-```
-
-**Monitor Training:**
-- Check TensorBoard: `tensorboard --logdir runs/ppo_grid_movable_critical`
-- Look for `metrics/movable_critical_pct` - should increase over training
-- Target: >50% of valid levels should be movable-critical by end of training
-
-### Evaluation
-
-**Quick evaluation:**
-```bash
-python eval_model.py \
-  --model runs/ppo_grid_movable_critical/ppo_grid_movable.zip \
-  --episodes 256 --max_steps 192
-```
-
-**Comprehensive evaluation with selection:**
-```bash
-python eval_and_select.py \
-  --model runs/ppo_grid_movable_critical/ppo_grid_movable.zip \
-  --episodes 2000 --max_steps 192 \
-  --w_min 0.20 --w_max 0.30 \
-  --movable_min 3 --movable_max 7 \
-  --adj_min 0.15 --iso_max 0.30 \
-  --min_Lsum 14 --min_L1 4 --min_L2 4 \
-  --out_dir eval_movable_critical --use_curriculum
-```
-
-**To require movable-critical condition for keepers**, edit `eval_and_select.py` line ~163:
-```python
-keep = (
-    (final_info["valid"] == 1) and
-    final_info.get("movable_critical", False) and  # Add this line
-    ...
-)
-```
-
----
-
-## Expected Outcomes
-
-### Before (Old Implementation)
-- ~5-10% of valid levels are movable-critical
-- Most movables are decorative (both strict and relaxed solvable)
-- Agent doesn't learn to place movables in critical positions
-
-### After (New Implementation)
-- **Target: >50% of valid levels should be movable-critical**
-- Movables are placed to block naive paths but puzzle remains solvable
-- Generated grids resemble hand-crafted SeGMaN puzzles with pushable blocks
-
----
-
-## Key Design Decisions
-
-1. **Dominant Reward Signal**: Movable-critical condition (+3.0) is the primary reward for good puzzles, outweighing other shaping terms
-2. **Explicit Checks**: Separate strict/relaxed BFS checks make the condition unambiguous
-3. **Penalty for Non-Critical**: Strong penalty (-2.0) if both strict and relaxed are solvable (movables are irrelevant)
-4. **Backward Compatibility**: Old metrics (`L1`, `L2`, `n_movable_on_path`) still present but deprecated
-
----
-
-## Files Modified
-
-1. `grid_pcg_env.py` - Core reward logic
-2. `train_ppo.py` - Added metrics callback
-3. `eval_model.py` - Enhanced reporting
-4. `eval_and_select.py` - Enhanced CSV and summary
-5. `ANALYSIS_AND_IMPROVEMENTS.md` - Analysis document (new)
-6. `CHANGES_SUMMARY.md` - This file (new)
-
----
+The agent should now:
+- Explore more freely toward the target wall ratio
+- Learn to balance risk (higher ratios) vs reward (terminal bonuses)
+- Not converge to a "safe" strategy at 0.27 regardless of target
 
 ## Next Steps
 
-1. **Train from scratch** with the new reward structure
-2. **Monitor TensorBoard** to see if movable-critical percentage increases
-3. **Evaluate** after training to verify >50% movable-critical rate
-4. **Adjust hyperparameters** if needed (reward magnitudes, curriculum schedule)
-5. **Compare** generated grids to hand-crafted SeGMaN puzzles
+1. **Retrain** with these changes
+2. **Monitor**:
+   - `metrics/avg_wall_ratio` (all episodes)
+   - `metrics/avg_wall_ratio_valid_only` (valid only)
+   - `rollout/ep_len_mean` (should be consistently 250 now)
+   - `rollout/ep_rew_mean` (should show improvement)
+3. **Compare** with previous runs to see if agent reaches higher ratios
 
----
+## Notes
 
-## Troubleshooting
-
-**If movable-critical percentage stays low:**
-- Check if relaxed solvability is high (good) but strict solvability is also high (bad)
-- May need to increase movable-critical bonus (+3.0) or decrease penalty for both solvable (-2.0)
-- Check curriculum schedule - movables are only introduced after progress > 0.5
-
-**If training is unstable:**
-- The reward magnitudes are tuned for stability, but you may need to adjust:
-  - Reduce movable-critical bonus if reward variance is too high
-  - Increase wall ratio penalty if structure is poor
-  - Adjust entropy coefficient if exploration is insufficient
-
+- The `_can_early_terminate()` function is still in the code but no longer called (dead code, can be removed later)
+- Early termination was originally intended to reward "good" grids, but it created more problems than it solved
+- The agent's ability to generate 0.30-0.34 ratios (from montages) suggests it CAN do it - the reward structure was preventing it
