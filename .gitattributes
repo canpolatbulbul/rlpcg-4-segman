@@ -2,3 +2,5 @@ runs/ppo_grid_corridors_v3/ppo_grid_nomask_final.zip filter=lfs diff=lfs merge=l
 runs/ppo_grid_corridors_v3/best_model.zip filter=lfs diff=lfs merge=lfs -text
 runs/ppo_grid_corridors_v3/ppo_ckpt_1011008_steps.zip filter=lfs diff=lfs merge=lfs -text
 runs/ppo_grid_corridors_v3/ppo_ckpt_404800_steps.zip filter=lfs diff=lfs merge=lfs -text
+final/phase1_model.zip filter=lfs diff=lfs merge=lfs -text
+final/phase2_model.zip filter=lfs diff=lfs merge=lfs -text

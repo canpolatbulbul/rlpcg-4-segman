@@ -16,6 +16,9 @@ fikir.txt
 .idea
 .vscode/
 
+*.md 
+!README.md
+
 # Large raw artifacts (safety net)
 # --- PUT GENERAL IGNORES FIRST ---
 *.zip
@@ -47,3 +50,5 @@ runs/ppo_grid_corridors_v3/*
 !runs/ppo_grid_corridors_v3/best_model.zip
 !runs/ppo_grid_corridors_v3/ppo_ckpt_404800_steps.zip
 !runs/ppo_grid_corridors_v3/ppo_ckpt_1011008_steps.zip
+!final/phase1_model.zip
+!final/phase2_model.zip
