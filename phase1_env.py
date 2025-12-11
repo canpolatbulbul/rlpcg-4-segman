@@ -355,9 +355,9 @@ class Phase1Env(gym.Env):
             L2_total += L2
         
         if not all_paths_valid:
-            # Reduced penalty to allow exploration without extreme fear
-            # Changed from -30.0 to -10.0 to balance risk/reward
-            return -10.0, metrics
+            # Further reduced penalty to encourage exploration
+            # Changed from -30.0 → -10.0 → -5.0 to make failures less catastrophic
+            return -5.0, metrics
         
         # Average path lengths for metrics (backward compatibility)
         L1_avg = L1_total / self.n_objects
@@ -398,9 +398,16 @@ class Phase1Env(gym.Env):
         # Final reward
         # Scale solvability bonus by number of objects (more objects = harder)
         solvability_bonus = 3.0 * self.n_objects
+        
+        # Large bonus for reaching target wall ratio (encourages agent to push toward target)
+        target_bonus = 0.0
+        if abs(wr - self.wall_target) < 0.05:
+            target_bonus = 20.0  # Large bonus for being within ±0.05 of target
+        
         R = (
             + 2.0  # Base validity bonus
             + solvability_bonus  # Solvability bonus (scaled by n_objects)
+            + target_bonus  # Large bonus for reaching target wall ratio
             + self.alpha * (L1_total + L2_total)  # Total path length across all pairs
             + wall_term  # Wall ratio
             + corridor_term  # Corridor quality
@@ -522,7 +529,7 @@ class Phase1Env(gym.Env):
         if terminated:
             if not self._valid_final():
                 wr = float(np.mean(self.grid == WALL))
-                reward += -10.0  # Reduced penalty for invalid grid (matches unsolvable penalty)
+                reward += -5.0  # Further reduced penalty for invalid grid (matches unsolvable penalty)
                 info = {"valid": 0, "L1": 0, "L2": 0, "wall_ratio": wr, "final_grid": self.grid.copy()}
             else:
                 r_eval, metrics = self._evaluate_grid()
