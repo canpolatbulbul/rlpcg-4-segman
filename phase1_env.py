@@ -72,7 +72,7 @@ class Phase1Env(gym.Env):
         self.lambda_corridor_term = 1.5    # Corridor quality
         self.lambda_isolated_term = 0.9    # Isolated walls penalty
         self.lambda_block_term = 0.3       # 2x2 block penalty
-        self.wall_ratio_penalty = 30.0     # Wall ratio deviation penalty (increased to encourage higher ratios)
+        self.wall_ratio_penalty = 60.0     # Wall ratio deviation penalty (strongly increased to push toward target)
         
         # Early termination bonus
         self.early_term_bonus = 0.2
@@ -482,7 +482,7 @@ class Phase1Env(gym.Env):
                 
                 # Place the wall
                 self.grid[y, x] = WALL
-                reward += 0.08  # Base bonus for placing wall (increased from 0.05)
+                reward += 0.10  # Base bonus for placing wall (increased to encourage more walls)
                 
                 # Check solvability AFTER placing wall
                 if robot_pos and len(object_positions) == self.n_objects and len(goal_positions) == self.n_objects:
@@ -503,14 +503,15 @@ class Phase1Env(gym.Env):
                     
                     # Reward maintaining solvability while placing walls
                     if solvable_before and solvable_after:
-                        reward += 0.20  # Significant bonus for maintaining solvability (increased from 0.15)
+                        reward += 0.25  # Increased bonus for maintaining solvability
                         # Additional bonus if we're below target and maintaining solvability
                         ws = self._wall_stats()
                         wr = ws["ratio"]
                         if wr < self.wall_target:
                             # Progressive bonus: more reward the further below target we are
                             target_gap = self.wall_target - wr
-                            reward += 0.15 * min(1.0, target_gap / 0.3)  # Max bonus when 0.3+ below target
+                            # Increased bonus: max 0.25 when 0.3+ below target (was 0.15)
+                            reward += 0.25 * min(1.0, target_gap / 0.3)  # Stronger incentive to reach target
                     elif solvable_before and not solvable_after:
                         reward -= 0.8  # Strong penalty for breaking solvability (increased from 0.5)
                         # Don't revert - let agent learn from mistakes, but penalty is strong enough to discourage
