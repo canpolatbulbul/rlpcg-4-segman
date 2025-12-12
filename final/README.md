@@ -53,6 +53,7 @@ python rai_env_gen.py \
 - `--wall_target`: Wall ratio target (should match Phase 1 training) (default: 0.35)
 - `--stochastic`: Use stochastic sampling (recommended, default)
 - `--deterministic`: Use greedy actions (often produces empty grids, not recommended)
+- `--critical_only`: Generates until we get a movable critical grid.
 
 **Output:**
 
